@@ -7,7 +7,7 @@ it at the door.
 
 > *"The little bird that stops your AI agent's big bill."*
 
-<!-- Hero gif goes here once recorded:  ![budgie in action](docs/demo.gif) -->
+![budgie blocking a $143,547/mo command before it runs](docs/demo.gif)
 
 ## Demo
 
