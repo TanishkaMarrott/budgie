@@ -62,6 +62,39 @@ uses **exit code 2** (the version-proof deny); a *warn* is a non-blocking hint;
 *allow* is silent. The core is a pure function: `command → parse → price →
 verdict`. No AWS SDK, no network.
 
+## Session accrual (cumulative cost)
+
+budgie keeps two **separate** numbers per session — the current burn and the
+money already spent — because a rate is not a cost:
+
+- **`active_rate` ($/hr)** — what the session is burning *right now*. A create
+  raises it; a teardown lowers it.
+- **`accrued_cost` ($)** — the *time-integral* of the burn: the area under the
+  active-rate line.
+
+```
+on every event (create / teardown):
+    accrued_cost += active_rate × (now − last_ts)   # Δt capped at 24h
+    last_ts       = now
+    create   → active_rate += resource_rate
+    teardown → active_rate −= resource_rate          # past dollars stay accrued
+
+ active_rate $/hr
+   5 │                 ┌──────────────┐
+     │                 │  burning $5  │
+   3 │        ┌────────┘              └────────┐        ← teardown A: rate drops,
+     │  $3    │            $5                $2 │          accrued does NOT
+   0 ┼────────┘                                └──────────▶  time
+     create A     create B              teardown A
+                                                     accrued = Σ (rate × Δt)
+```
+
+The **cap is checked against `active_rate`** (max concurrent burn), so two
+individually-cheap boxes can still trip it together; `accrued_cost` is the real
+dollars spent so far and projects to expiry. `budgie session` prints both.
+This mirrors KML's `cost_estimator` accrual — rate and cost kept distinct, with
+active vs torn-down resources tracked separately.
+
 ## Install
 
 ```bash
