@@ -58,5 +58,32 @@ def main() -> int:
     return 0
 
 
+def posthook_main() -> int:
+    """PostToolUse hook — reconciles the session burn after a command runs
+    (records created resource ids, credits deletes/failed creates). Always
+    exits 0; reconciliation is best-effort and never disrupts the agent."""
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except (json.JSONDecodeError, ValueError):
+        return 0
+    command = (payload.get("tool_input") or {}).get("command", "")
+    session_id = payload.get("session_id", "")
+    resp = payload.get("tool_response")
+    if isinstance(resp, dict):
+        output = resp.get("stdout") or resp.get("output") or ""
+        success = not (resp.get("error") or resp.get("interrupted")
+                       or (isinstance(resp.get("exit_code"), int) and resp["exit_code"] != 0)
+                       or (isinstance(resp.get("returncode"), int) and resp["returncode"] != 0))
+    else:
+        output, success = str(resp or ""), True
+    try:
+        from .reconcile import reconcile
+        reconcile(command, output, success, session_id)
+    except Exception:
+        pass
+    return 0
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

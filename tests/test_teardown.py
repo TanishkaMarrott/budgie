@@ -1,4 +1,5 @@
 """Teardown: plan generation + executor (dry-run by default, double opt-in to run)."""
+import json
 import os
 import sys
 
@@ -33,3 +34,32 @@ def test_executor_needs_double_optin(monkeypatch):
 
 def test_tag_flag():
     assert tag_flag("abc123") == "budgie:session=abc123"
+
+
+def _seed_active(tmp_path, sid, rate):
+    import datetime
+    d = tmp_path / "sessions"; d.mkdir(parents=True, exist_ok=True)
+    (d / f"{sid}.json").write_text(json.dumps(
+        {"active_rate": rate, "accrued_cost": 0.0,
+         "last_ts": datetime.datetime.now().isoformat(), "resources": {}}))
+
+
+def test_teardown_credits_burn_on_real_delete(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUDGIE_HOME", str(tmp_path))
+    monkeypatch.setenv("BUDGIE_ALLOW_TEARDOWN", "1")
+    from budgie import state
+    _seed_active(tmp_path, "sess", 5.0)
+    res = [Resource("ec2:instance", "i-1", "true", rate=3.0),   # 'true' = harmless success
+           Resource("rds:db", "d-1", "true", rate=2.0)]
+    out = execute_teardown(res, confirm=True, session_id="sess")
+    assert [s for s, _ in out] == ["deleted", "deleted"]
+    assert state.session_total("sess") == 0.0                   # $5 - $3 - $2
+
+def test_dry_run_credits_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUDGIE_HOME", str(tmp_path))
+    monkeypatch.delenv("BUDGIE_ALLOW_TEARDOWN", raising=False)
+    from budgie import state
+    _seed_active(tmp_path, "sess", 5.0)
+    execute_teardown([Resource("ec2:instance", "i-1", "true", rate=3.0)],
+                     confirm=True, session_id="sess")           # env unset -> dry-run
+    assert state.session_total("sess") == 5.0

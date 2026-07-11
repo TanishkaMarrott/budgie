@@ -110,9 +110,12 @@ Wire it as a `PreToolUse` hook (blocks before the spend):
 
 ```jsonc
 // .claude/settings.json
-{ "hooks": { "PreToolUse": [
-    { "matcher": "Bash", "hooks": [
-        { "type": "command", "command": "budgie hook" } ] } ] } }
+{ "hooks": {
+    "PreToolUse":  [ { "matcher": "Bash", "hooks": [
+        { "type": "command", "command": "budgie hook" } ] } ],
+    "PostToolUse": [ { "matcher": "Bash", "hooks": [
+        { "type": "command", "command": "budgie posthook" } ] } ]   // keeps the burn honest
+} }
 ```
 
 Set the cap with `BUDGIE_HOURLY=2.0`. Live AWS pricing (full SKU coverage):
@@ -122,7 +125,8 @@ Set the cap with `BUDGIE_HOURLY=2.0`. Live AWS pricing (full SKU coverage):
 
 ```
 budgie check "<command>"     # price + gate one command
-budgie hook                  # PreToolUse hook entry (reads JSON on stdin)
+budgie hook                  # PreToolUse hook entry — prices + gates (exit 2 blocks)
+budgie posthook              # PostToolUse hook — reconciles the session burn
 budgie tf-plan plan.json     # price a `terraform show -json` plan
 budgie session               # show each session's burn ($/hr) and accrued ($)
 budgie ledger                # recent decisions + total spend stopped
@@ -130,17 +134,19 @@ budgie ledger                # recent decisions + total spend stopped
 
 ## What it does today
 
-- ✅ **Prices** the AWS services that cause most bill-shocks — EC2, RDS (+ resize),
-  EKS, NAT, ElastiCache, Redshift, ELB, **EBS volumes** (storage $/GB-mo),
-  **SageMaker**, **OpenSearch**. **Warns** (never silent-allow) when the cost is
+- ✅ **Composite pricing** — RDS = instance **+ storage + Multi-AZ**; EKS = control
+  plane **+ node groups**; EBS volumes ($/GB-mo). Plus EC2, NAT, ElastiCache,
+  Redshift, ELB, SageMaker, OpenSearch. **Warns** (never silent-allow) when cost is
   hidden — Fargate, Aurora, EMR, MSK, `--cli-input-json`, `terraform apply`.
 - ✅ Extracts **every** `aws` invocation from **loops / `&&` / `;` / xargs / full
   paths**; handles `--dry-run`, **spot** (~70% off), **region**, robust `--count 1:5`.
 - ✅ **Blocks via exit code 2** (version-proof hard deny); warns are non-blocking
   hints; allow is silent. Crash-proof, **fail-closed** on spend commands.
 - ✅ **Cumulative session budget** — tracks the session's **active run-rate ($/hr)**
-  and **accrued cost ($ = rate × time)** *separately*; teardown lowers the burn
-  while past dollars stay. `budgie session` shows both.
+  and **accrued cost ($ = rate × time)** *separately*. `budgie session` shows both.
+- ✅ **PostToolUse reconciliation** — records created resource ids and **credits the
+  burn back** when the agent deletes them (or when a create fails); teardown does
+  the same. No AWS polling.
 - ✅ **Terraform** — `budgie tf-plan` prices a `terraform show -json` plan.
 - ✅ **Ledger** + **override** (`BUDGIE_OK=1` / `.budgie/allow.txt`).
 - ✅ **Live AWS pricing** — region-aware, disk-cached (AWS Price List API); zero-dep
@@ -148,10 +154,10 @@ budgie ledger                # recent decisions + total spend stopped
 
 ## Roadmap
 
-- **Composite pricing** — fold attached storage (RDS `--allocated-storage`, an
-  instance's EBS volumes) and EKS worker nodes into the per-command estimate.
-- **Auto-teardown reconciliation** — discover session-tagged resources (Resource
-  Groups Tagging API) to credit the burn back automatically on delete.
+- **EC2 root/data volumes** — fold `--block-device-mappings` EBS into the instance
+  estimate (RDS storage + EKS nodes are already composite).
+- **Out-of-band deletes** — reconciliation is agent-driven; console / TTL /
+  autoscaling deletes would need resource-snapshot polling (a platform's job).
 - **Multi-cloud** — GCP / Azure pricing tables.
 - **Hard enforcement** — mint a scoped credential / SCP from the budget (the
   un-bypassable tier).
@@ -163,11 +169,13 @@ budgie is a **fast advisory guard**, not an un-bypassable control. Know its edge
 - **Bash-tool only.** An agent using an AWS **MCP server** (boto3 directly)
   bypasses it. The un-bypassable tier is a scoped credential / SCP minted from the
   budget — on the roadmap.
-- **Per-command, not composite (yet).** It prices the resource *in the command*.
-  Attached storage (RDS allocated storage, an instance's EBS volumes) and dependent
-  resources (EKS worker nodes) often arrive in *separate* commands, so a single
-  storage-/node-heavy resource can be **under-estimated**. The cumulative session
-  total partly compensates as those separate commands add up.
+- **Composite only where the data's in the command.** RDS storage/Multi-AZ and EKS
+  node groups are folded in; an EC2 instance's own EBS volumes
+  (`--block-device-mappings`) are **not yet**, so a big root volume can be
+  under-counted. The cumulative session total partly compensates.
+- **Agent-driven reconciliation.** budgie credits deletes it *sees* (the agent's
+  own commands). A delete done from the console / by TTL / by autoscaling won't be
+  caught without snapshot polling — out of scope for a hook.
 - **Provisioning cost, not usage cost.** Usage-based services — S3, Lambda,
   DynamoDB on-demand, data transfer, NAT data processing — can't be known before
   the fact and are not priced.

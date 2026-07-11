@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("command")
     c.add_argument("--cap", type=float, default=2.0, help="hourly $ cap")
     sub.add_parser("hook", help="PreToolUse hook entry (reads JSON on stdin)")
+    sub.add_parser("posthook", help="PostToolUse hook entry (reconciles the session burn)")
     sub.add_parser("ledger", help="show recent decisions + spend stopped")
     sub.add_parser("session", help="show cumulative $/hr committed per session")
     t = sub.add_parser("tf-plan", help="price a `terraform show -json` plan file")
@@ -56,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "hook":
         from .hook import main as hook_main
         return hook_main()
+    if args.cmd == "posthook":
+        from .hook import posthook_main
+        return posthook_main()
     if args.cmd == "ledger":
         return _ledger(args)
     if args.cmd == "session":

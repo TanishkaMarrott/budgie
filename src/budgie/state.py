@@ -44,10 +44,11 @@ def _read(sid: str) -> dict:
             d = json.loads(f.read_text())
             return {"active_rate": float(d.get("active_rate", 0.0)),
                     "accrued_cost": float(d.get("accrued_cost", 0.0)),
-                    "last_ts": d.get("last_ts")}
+                    "last_ts": d.get("last_ts"),
+                    "resources": dict(d.get("resources", {}))}
         except (json.JSONDecodeError, ValueError, OSError):
             pass
-    return {"active_rate": 0.0, "accrued_cost": 0.0, "last_ts": None}
+    return {"active_rate": 0.0, "accrued_cost": 0.0, "last_ts": None, "resources": {}}
 
 
 def _write(sid: str, s: dict) -> None:
@@ -55,7 +56,8 @@ def _write(sid: str, s: dict) -> None:
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps({"active_rate": round(s["active_rate"], 6),
                              "accrued_cost": round(s["accrued_cost"], 6),
-                             "last_ts": s["last_ts"]}))
+                             "last_ts": s["last_ts"],
+                             "resources": s.get("resources", {})}))
 
 
 def _accrue(s: dict, now: "datetime.datetime") -> dict:
@@ -98,6 +100,25 @@ def release_active(sid: str, hourly: float) -> None:
     s = _accrue(_read(sid), datetime.datetime.now())
     s["active_rate"] = max(0.0, s["active_rate"] - hourly)
     _write(sid, s)
+
+
+def record_resource(sid: str, resource_id: str, rate: float) -> None:
+    """Associate a just-created resource id with the rate already committed at
+    PreToolUse. Doesn't touch active_rate — only enables later release-by-id."""
+    s = _read(sid)
+    s["resources"][resource_id] = round(float(rate), 6)
+    _write(sid, s)
+
+
+def release_by_id(sid: str, resource_id: str) -> float:
+    """A resource with a known id was deleted: drop its rate from the active burn
+    and the map. Returns the freed rate (0.0 if the id wasn't tracked)."""
+    s = _accrue(_read(sid), datetime.datetime.now())
+    rate = float(s["resources"].pop(resource_id, 0.0))
+    if rate:
+        s["active_rate"] = max(0.0, s["active_rate"] - rate)
+    _write(sid, s)
+    return rate
 
 
 def reset_session(sid: str) -> None:

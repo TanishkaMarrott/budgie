@@ -44,6 +44,9 @@ EBS_GB_MONTH = {  # storage is $/GB-month -> hourly via / HOURS_PER_MONTH
     "gp3": 0.08, "gp2": 0.10, "io1": 0.125, "io2": 0.125,
     "st1": 0.045, "sc1": 0.015, "standard": 0.05,
 }
+RDS_STORAGE_GB_MONTH = {"gp2": 0.115, "gp3": 0.115, "io1": 0.125, "io2": 0.125,
+                        "standard": 0.10, "magnetic": 0.10}
+RDS_IOPS_MONTH = 0.10   # per provisioned IOPS-month (io1/io2)
 
 # Flat-rate resources: $/hr regardless of size
 FLAT = {
@@ -66,6 +69,15 @@ def ebs_hourly(volume_type: str, size_gb: int) -> float | None:
     """EBS volume cost as $/hr (storage priced per GB-month)."""
     rate = EBS_GB_MONTH.get(volume_type)
     return None if rate is None else round(rate * size_gb / HOURS_PER_MONTH, 6)
+
+
+def rds_storage_hourly(storage_type: str, gb: int, iops: int = 0) -> float:
+    """RDS allocated storage (+ provisioned IOPS) as $/hr."""
+    rate = RDS_STORAGE_GB_MONTH.get(storage_type, RDS_STORAGE_GB_MONTH["gp2"])
+    cost = gb * rate / HOURS_PER_MONTH
+    if storage_type in ("io1", "io2") and iops:
+        cost += iops * RDS_IOPS_MONTH / HOURS_PER_MONTH
+    return round(cost, 6)
 
 
 # --- pricing provider seam -------------------------------------------------

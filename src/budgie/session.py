@@ -33,9 +33,10 @@ def tag_flag(session_id: str) -> str:
 
 @dataclass
 class Resource:
-    kind: str      # e.g. "ec2:instance", "rds:db"
-    id: str        # arn / physical id
+    kind: str          # e.g. "ec2:instance", "rds:db"
+    id: str            # arn / physical id
     delete_cmd: str
+    rate: float = 0.0  # $/hr this resource was burning — credited back on teardown
 
 
 def teardown_plan(session_id: str, resources: list[Resource]) -> list[str]:
@@ -53,11 +54,15 @@ def teardown_plan(session_id: str, resources: list[Resource]) -> list[str]:
     return lines
 
 
-def execute_teardown(resources: list[Resource], confirm: bool = False) -> list[tuple[str, str]]:
+def execute_teardown(resources: list[Resource], confirm: bool = False,
+                     session_id: str = "") -> list[tuple[str, str]]:
     """Tear down the session's resources. DRY-RUN by default: returns
     [("dry-run", cmd), ...] and runs nothing. Actual deletion happens ONLY when
-    confirm=True AND env BUDGIE_ALLOW_TEARDOWN=1 — double opt-in, because
-    deleting real infrastructure is irreversible.
+    confirm=True AND env BUDGIE_ALLOW_TEARDOWN=1 — double opt-in.
+
+    On a successful real deletion, the resource's rate is credited back to the
+    session (release_active) so the active burn reflects what's still running.
+    Dry-run credits nothing.
     """
     live = confirm and os.environ.get("BUDGIE_ALLOW_TEARDOWN") == "1"
     results: list[tuple[str, str]] = []
@@ -66,5 +71,11 @@ def execute_teardown(resources: list[Resource], confirm: bool = False) -> list[t
             results.append(("dry-run", r.delete_cmd))
             continue
         proc = subprocess.run(shlex.split(r.delete_cmd), capture_output=True, text=True)
-        results.append(("deleted" if proc.returncode == 0 else "error", r.delete_cmd))
+        if proc.returncode == 0:
+            if r.rate:
+                from . import state
+                state.release_active(session_id, r.rate)   # credit the burn back
+            results.append(("deleted", r.delete_cmd))
+        else:
+            results.append(("error", r.delete_cmd))
     return results

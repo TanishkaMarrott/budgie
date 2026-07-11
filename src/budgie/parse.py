@@ -12,9 +12,9 @@ import shlex
 from dataclasses import dataclass
 
 # action -> (pricing table, sku flag).  Priceable straight from the CLI.
+# (create-db-instance is handled separately so it can add attached storage.)
 _SKU_ACTIONS = {
     "run-instances": ("ec2", "instance-type"),
-    "create-db-instance": ("rds", "db-instance-class"),
     "create-cache-cluster": ("elasticache", "cache-node-type"),
     "create-notebook-instance": ("sagemaker", "instance-type"),
 }
@@ -51,6 +51,16 @@ def _kv(s: str, key: str) -> str | None:
     return None
 
 
+def _rds_storage(it: "Intent", flags: dict) -> None:
+    """Attach RDS storage details from the create/modify command onto the intent."""
+    gb = flags.get("allocated-storage", "")
+    it.storage_gb = int(gb) if gb.isdigit() else 0
+    it.storage_type = flags.get("storage-type", "gp2")
+    io = flags.get("iops", "")
+    it.iops = int(io) if io.isdigit() else 0
+    it.multi_az = "multi-az" in flags
+
+
 @dataclass
 class Intent:
     service: str
@@ -65,6 +75,11 @@ class Intent:
     reason: str = ""
     in_loop: bool = False
     raw: str = ""
+    # composite (RDS): storage attached to the instance in the same command
+    storage_gb: int = 0
+    storage_type: str = "gp2"
+    iops: int = 0
+    multi_az: bool = False
 
 
 def _tokenize(command: str) -> list[str]:
@@ -151,10 +166,35 @@ def _parse_invocation(span: list[str], in_loop: bool, raw: str) -> Intent | None
             return it
         return warn("params in --cli-input-json") if unpriceable else warn("OpenSearch instance not in --cluster-config")
 
+    # RDS instance — price the class + attached storage (+ Multi-AZ doubling).
+    if action == "create-db-instance" and service == "rds":
+        sku = flags.get("db-instance-class")
+        if not sku:
+            return warn("params in --cli-input-json") if unpriceable else warn("db-instance-class missing")
+        it = _mk(service, action, "rds", sku, flags, in_loop, raw)
+        _rds_storage(it, flags)
+        return it
+
     # RDS resize (modify to a bigger class) — only our concern when a class is given.
     if action == "modify-db-instance":
         sku = flags.get("db-instance-class")
-        return _mk(service, action, "rds", sku, flags, in_loop, raw) if sku else None
+        if not sku:
+            return None
+        it = _mk(service, action, "rds", sku, flags, in_loop, raw)
+        _rds_storage(it, flags)
+        return it
+
+    # EKS worker nodes — a nodegroup is where the real EKS cost lives (control
+    # plane alone is $0.10/hr; the nodes are EC2 instances × desired size).
+    if action == "create-nodegroup" and service == "eks":
+        itypes = flags.get("instance-types") or flags.get("instance-type")
+        sku = itypes.split(",")[0].strip() if itypes else None
+        if not sku:
+            return warn("params in --cli-input-json") if unpriceable else warn("nodegroup instance type missing")
+        it = _mk(service, action, "ec2", sku, flags, in_loop, raw)
+        desired = _kv(flags.get("scaling-config", ""), "desiredSize")
+        it.qty = int(desired) if desired and desired.isdigit() else 1
+        return it
 
     if action == "create-cluster" and service == "redshift":
         sku = flags.get(_REDSHIFT[1])

@@ -53,6 +53,18 @@ def estimate(intent: Intent) -> Estimate:
         return Estimate(None, intent.qty, label, False, intent.region,
                         intent.reason or "unrecognized resource")
 
+    if intent.table == "rds":                    # composite: instance + storage (+ Multi-AZ)
+        base = pricing.lookup("rds", intent.sku or "", intent.region)
+        if base is None:
+            return Estimate(None, intent.qty, label, False, intent.region, "unknown db class")
+        mult = 2 if intent.multi_az else 1
+        total = base * mult
+        note = "Multi-AZ" if intent.multi_az else ""
+        if intent.storage_gb:
+            total += pricing.rds_storage_hourly(intent.storage_type, intent.storage_gb, intent.iops) * mult
+            note = (note + "; " if note else "") + f"+{intent.storage_gb}GB {intent.storage_type}"
+        return Estimate(round(total, 6), intent.qty, label, True, intent.region, note)
+
     rate = pricing.lookup(intent.table, intent.sku or "", intent.region)
     note = ""
     if rate is not None and intent.spot:
