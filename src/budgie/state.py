@@ -31,20 +31,73 @@ def _session_file(sid: str) -> Path:
     return _home() / "sessions" / f"{sid or 'default'}.json"
 
 
-def session_total(sid: str) -> float:
+_DELTA_CAP_H = 24.0     # cap one interval's accrual so a long gap can't explode it
+
+
+def _read(sid: str) -> dict:
+    """Session state: active_rate ($/hr, the current burn) + accrued_cost ($, the
+    time-integral) + last_ts. Rate and cost are SEPARATE — a torn-down resource
+    lowers active_rate but its past dollars stay in accrued_cost."""
     f = _session_file(sid)
     if f.exists():
         try:
-            return float(json.loads(f.read_text()).get("committed_hourly", 0.0))
+            d = json.loads(f.read_text())
+            return {"active_rate": float(d.get("active_rate", 0.0)),
+                    "accrued_cost": float(d.get("accrued_cost", 0.0)),
+                    "last_ts": d.get("last_ts")}
         except (json.JSONDecodeError, ValueError, OSError):
-            return 0.0
-    return 0.0
+            pass
+    return {"active_rate": 0.0, "accrued_cost": 0.0, "last_ts": None}
+
+
+def _write(sid: str, s: dict) -> None:
+    f = _session_file(sid)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"active_rate": round(s["active_rate"], 6),
+                             "accrued_cost": round(s["accrued_cost"], 6),
+                             "last_ts": s["last_ts"]}))
+
+
+def _accrue(s: dict, now: "datetime.datetime") -> dict:
+    """Fold elapsed time at the CURRENT active_rate into accrued_cost
+    (accrued += active_rate × Δh, Δh capped), then advance the clock. This is
+    the KML integral: cumulative dollars, not a sum of rates."""
+    if s["last_ts"]:
+        try:
+            prev = datetime.datetime.fromisoformat(s["last_ts"])
+            dh = (now - prev).total_seconds() / 3600.0
+            s["accrued_cost"] += s["active_rate"] * max(0.0, min(dh, _DELTA_CAP_H))
+        except ValueError:
+            pass
+    s["last_ts"] = now.isoformat(timespec="seconds")
+    return s
+
+
+def session_total(sid: str) -> float:
+    """Current ACTIVE run-rate ($/hr) — what the session is burning now. This is
+    what the cumulative budget cap is checked against."""
+    return _read(sid)["active_rate"]
+
+
+def session_accrued(sid: str) -> float:
+    """Dollars accrued so far = time-integral of active_rate, brought to now."""
+    return _accrue(_read(sid), datetime.datetime.now())["accrued_cost"]
 
 
 def _commit(sid: str, hourly: float) -> None:
-    f = _session_file(sid)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps({"committed_hourly": round(session_total(sid) + hourly, 6)}))
+    """A new resource goes live: accrue elapsed at the old rate, then raise the
+    active rate."""
+    s = _accrue(_read(sid), datetime.datetime.now())
+    s["active_rate"] += hourly
+    _write(sid, s)
+
+
+def release_active(sid: str, hourly: float) -> None:
+    """A resource is torn down (is_deleted): accrue up to now at the old rate,
+    then LOWER the active rate. Past dollars stay; future accrual drops."""
+    s = _accrue(_read(sid), datetime.datetime.now())
+    s["active_rate"] = max(0.0, s["active_rate"] - hourly)
+    _write(sid, s)
 
 
 def reset_session(sid: str) -> None:

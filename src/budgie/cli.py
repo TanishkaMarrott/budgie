@@ -9,14 +9,14 @@ from . import check, __version__
 
 
 def _session(_args) -> int:
-    from .state import _home, session_total
+    from .state import _home, session_total, session_accrued
     d = _home() / "sessions"
     files = sorted(d.glob("*.json")) if d.exists() else []
     if not files:
         print("no sessions tracked yet"); return 0
     for f in files:
-        t = session_total(f.stem)
-        print(f"  {f.stem}: ${t:.2f}/hr committed  (${t * 730:,.0f}/mo)")
+        rate, accrued = session_total(f.stem), session_accrued(f.stem)
+        print(f"  {f.stem}: burning ${rate:.2f}/hr  ·  accrued ${accrued:.2f} so far")
     return 0
 
 
