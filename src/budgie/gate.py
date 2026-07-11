@@ -38,9 +38,10 @@ def aggregate(estimates: list[Estimate], cap_hourly: float, in_loop: bool = Fals
 
     if total > cap_hourly:
         what = top if len(known) == 1 else f"{len(known)} resources incl. {top}"
+        cmd_monthly = cmd_total * pricing.HOURS_PER_MONTH
         return Decision("block",
-            f"{what} ≈ ${cmd_total:.2f}/hr — over the ${cap_hourly:.2f}/hr session "
-            f"cap{sess}. Blocked.{tail}")
+            f"{what} ≈ ${cmd_total:.2f}/hr (${cmd_monthly:,.0f}/mo) — over the "
+            f"${cap_hourly:.2f}/hr session cap{sess}. Blocked.{tail}")
 
     if unknown:
         u = unknown[0]

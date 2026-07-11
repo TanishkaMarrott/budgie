@@ -7,7 +7,25 @@ it at the door.
 
 > *"The little bird that stops your AI agent's big bill."*
 
-<!-- ![demo](demo.gif)  ← the clip: agent runs `aws ec2 run-instances p5.48xlarge ×2`, budgie blocks a $143,547/mo command before it executes -->
+<!-- Hero gif goes here once recorded:  ![budgie in action](docs/demo.gif) -->
+
+## Demo
+
+```console
+$ budgie check 'aws ec2 run-instances --instance-type p5.48xlarge --count 2'
+[BLOCK] 2× ec2 p5.48xlarge ≈ $196.64/hr ($143,547/mo) — over the $2.00/hr session cap. Blocked.
+
+$ budgie check 'for i in $(seq 100); do aws ec2 run-instances --instance-type p5.48xlarge; done'
+[BLOCK] 1× ec2 p5.48xlarge ≈ $98.32/hr ($71,774/mo) — over the $2.00/hr session cap. Blocked.
+
+$ budgie check 'aws rds create-db-instance --db-instance-class db.r5.24xlarge'
+[BLOCK] 1× rds db.r5.24xlarge ≈ $11.52/hr ($8,410/mo) — over the $2.00/hr session cap. Blocked.
+
+$ budgie check 'aws ec2 run-instances --instance-type t3.micro'
+[ALLOW] ≈ $0.01/hr — within budget.
+```
+
+Record the animated version with [`vhs`](https://github.com/charmbracelet/vhs): `vhs demo/demo.tape` → writes `docs/demo.gif`.
 
 ---
 
