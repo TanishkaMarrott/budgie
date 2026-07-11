@@ -1,0 +1,62 @@
+"""budgie CLI:  check "<cmd>" | hook | ledger | version"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+from . import check, __version__
+
+
+def _ledger(_args) -> int:
+    from .state import _home
+    f = _home() / "ledger.jsonl"
+    if not f.exists():
+        print("no budgie ledger yet"); return 0
+    rows = [json.loads(x) for x in f.read_text().splitlines() if x.strip()]
+    blocked = sum(1 for r in rows if r["verdict"] == "block")
+    saved = sum(r.get("command_hourly", 0) for r in rows if r["verdict"] == "block")
+    for r in rows[-20:]:
+        print(f"  {r['ts']}  [{r['verdict']:5}]  ${r.get('command_hourly',0):.2f}/hr  "
+              f"{r['command'][:70]}")
+    print(f"\n{len(rows)} decisions · {blocked} blocked · "
+          f"~${saved:.2f}/hr (${saved*730:,.0f}/mo) of spend stopped")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="budgie")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("check", help="price + gate one command")
+    c.add_argument("command")
+    c.add_argument("--cap", type=float, default=2.0, help="hourly $ cap")
+    sub.add_parser("hook", help="PreToolUse hook entry (reads JSON on stdin)")
+    sub.add_parser("ledger", help="show recent decisions + spend stopped")
+    t = sub.add_parser("tf-plan", help="price a `terraform show -json` plan file")
+    t.add_argument("file")
+    t.add_argument("--cap", type=float, default=2.0)
+    sub.add_parser("version")
+    args = p.parse_args(argv)
+
+    if args.cmd == "version":
+        print(__version__); return 0
+    if args.cmd == "hook":
+        from .hook import main as hook_main
+        return hook_main()
+    if args.cmd == "ledger":
+        return _ledger(args)
+    if args.cmd == "tf-plan":
+        from pathlib import Path
+        from .terraform import price_plan
+        d = price_plan(Path(args.file).read_text(), args.cap)
+        print(f"[{d.verdict.upper()}] {d.reason}")
+        return 1 if d.verdict == "block" else 0
+
+    d = check(args.command, args.cap)
+    tag = {"block": "BLOCK", "warn": "WARN", "allow": "ALLOW"}[d.verdict]
+    print(f"[{tag}] {d.reason}")
+    return 1 if d.verdict == "block" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
