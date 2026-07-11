@@ -63,8 +63,12 @@ pure function: `command → parse → price → verdict`. No AWS SDK, no network
 ## Install
 
 ```bash
+# from PyPI (once published)
 uvx budgie check "aws ec2 run-instances --instance-type p5.48xlarge --count 2"
 # [BLOCK] 2× ec2 p5.48xlarge ≈ $196.64/hr ($143,547/mo) — over the $2.00/hr cap.
+
+# or straight from GitHub, no PyPI needed:
+uvx --from git+https://github.com/TanishkaMarrott/budgie budgie check "aws ec2 run-instances --instance-type p5.48xlarge"
 ```
 
 Wire it as a `PreToolUse` hook (blocks before the spend):

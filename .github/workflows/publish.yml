@@ -1,0 +1,19 @@
+name: publish
+# Publishes to PyPI on a version tag via Trusted Publishing (OIDC, no tokens).
+# One-time setup: on PyPI, add a trusted publisher for repo TanishkaMarrott/budgie,
+# workflow `publish.yml`, environment `pypi`.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write            # required for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1
