@@ -48,17 +48,19 @@ AWS bill**. Every existing guardrail is too late or too coarse:
 agent about to run:  aws ec2 run-instances --instance-type p5.48xlarge --count 2
         │
         ▼   PreToolUse hook (budgie)
-   parse the command → SKU + region + qty      (no execution — pure string→price)
-   price it:  2 × $98.32/hr = $196.64/hr  ($143,547/mo)
-   over the $2/hr session cap?  → DENY  ✗   the command never runs
+   parse → find every aws command (loops, &&, ;, /path/aws)   [no execution]
+   price → 2 × $98.32/hr = $196.64/hr  ($143,547/mo)
+   add to the session's active run-rate → over the $2/hr cap?
         │
-        ▼   under budget → allow; created resources tagged budgie:session=<id>
-        ▼   session end → tear down exactly what this session created  ("$X spent, 0 orphans")
+        ├─ yes → exit code 2  ✗   Claude Code blocks it; the command never runs
+        └─ no  → allow (exit 0) → commit the rate to the session
 ```
 
 budgie **inspects** the command and decides allow/deny — it never runs the
-command itself (that stays with the agent, only if budgie allows). The core is a
-pure function: `command → parse → price → verdict`. No AWS SDK, no network.
+command itself (that stays with the agent, only if budgie allows). A hard block
+uses **exit code 2** (the version-proof deny); a *warn* is a non-blocking hint;
+*allow* is silent. The core is a pure function: `command → parse → price →
+verdict`. No AWS SDK, no network.
 
 ## Install
 
@@ -83,37 +85,63 @@ Wire it as a `PreToolUse` hook (blocks before the spend):
 Set the cap with `BUDGIE_HOURLY=2.0`. Live AWS pricing (full SKU coverage):
 `pip install budgie[aws]` and `BUDGIE_PRICING=aws`.
 
+## Commands
+
+```
+budgie check "<command>"     # price + gate one command
+budgie hook                  # PreToolUse hook entry (reads JSON on stdin)
+budgie tf-plan plan.json     # price a `terraform show -json` plan
+budgie session               # show each session's burn ($/hr) and accrued ($)
+budgie ledger                # recent decisions + total spend stopped
+```
+
 ## What it does today
 
-- ✅ Prices imperative AWS commands that cause most bill-shocks (EC2, RDS, EKS, NAT, ElastiCache, Redshift, ELB); extracts them from **loops / `&&` / `;` / xargs** (not just lines starting with `aws`); fails **safe** on unknown SKUs, `--cli-input-json`, and IaC applies.
-- ✅ Handles `--dry-run` (no charge), **spot** (~70% off), **region**, robust quantities (`--count 1:5`).
-- ✅ **Cumulative session budget** — the cap is checked against everything committed this session, not just one command.
-- ✅ **Ledger** (`budgie ledger`) — every decision + "spend stopped" total.
-- ✅ **Override** — `BUDGIE_OK=1` or a `.budgie/allow.txt` allowlist for intended spend.
-- ✅ Crash-proof hook, **fail-closed** on spend commands (`BUDGIE_FAIL=open` to override).
-- ✅ **Live AWS pricing** — `pip install budgie[aws]` + `BUDGIE_PRICING=aws` (AWS Price List API); static table is the zero-dep default.
+- ✅ **Prices** the AWS services that cause most bill-shocks — EC2, RDS (+ resize),
+  EKS, NAT, ElastiCache, Redshift, ELB, **EBS volumes** (storage $/GB-mo),
+  **SageMaker**, **OpenSearch**. **Warns** (never silent-allow) when the cost is
+  hidden — Fargate, Aurora, EMR, MSK, `--cli-input-json`, `terraform apply`.
+- ✅ Extracts **every** `aws` invocation from **loops / `&&` / `;` / xargs / full
+  paths**; handles `--dry-run`, **spot** (~70% off), **region**, robust `--count 1:5`.
+- ✅ **Blocks via exit code 2** (version-proof hard deny); warns are non-blocking
+  hints; allow is silent. Crash-proof, **fail-closed** on spend commands.
+- ✅ **Cumulative session budget** — tracks the session's **active run-rate ($/hr)**
+  and **accrued cost ($ = rate × time)** *separately*; teardown lowers the burn
+  while past dollars stay. `budgie session` shows both.
+- ✅ **Terraform** — `budgie tf-plan` prices a `terraform show -json` plan.
+- ✅ **Ledger** + **override** (`BUDGIE_OK=1` / `.budgie/allow.txt`).
+- ✅ **Live AWS pricing** — region-aware, disk-cached (AWS Price List API); zero-dep
+  static table is the default.
 
 ## Roadmap
 
-- **Terraform/Pulumi** — plan-based pricing (Infracost / AWS Pricing MCP).
-- **Tag + teardown** — session provenance → auto-cleanup on session end (`session.py`).
+- **Composite pricing** — fold attached storage (RDS `--allocated-storage`, an
+  instance's EBS volumes) and EKS worker nodes into the per-command estimate.
+- **Auto-teardown reconciliation** — discover session-tagged resources (Resource
+  Groups Tagging API) to credit the burn back automatically on delete.
 - **Multi-cloud** — GCP / Azure pricing tables.
-- **Hard enforcement** — mint a scoped credential / SCP from the budget (the un-bypassable tier).
+- **Hard enforcement** — mint a scoped credential / SCP from the budget (the
+  un-bypassable tier).
 
 ## Limitations (honest)
 
 budgie is a **fast advisory guard**, not an un-bypassable control. Know its edges:
 
-- **Bash-tool only.** It sees shell commands. An agent using an AWS **MCP server**
-  (boto3 directly) bypasses it. The un-bypassable tier is a scoped credential / SCP
-  minted from the budget — on the roadmap.
-- **Provisioning cost, not usage cost.** It prices what a command *creates* (run-rate).
-  Usage-based services — S3, Lambda, DynamoDB on-demand, data transfer, NAT data
-  processing — can't be known before the fact and are not priced.
-- **Estimates, not invoices.** It ignores Reserved Instances / Savings Plans / spot
-  fluctuation, so a covered account may see over-estimates. Spot is a rough ~70% off.
-- **Curated coverage.** It prices/​warns the big bill-shock services; it does not
-  claim to price every AWS resource. Free creates are intentionally silent.
+- **Bash-tool only.** An agent using an AWS **MCP server** (boto3 directly)
+  bypasses it. The un-bypassable tier is a scoped credential / SCP minted from the
+  budget — on the roadmap.
+- **Per-command, not composite (yet).** It prices the resource *in the command*.
+  Attached storage (RDS allocated storage, an instance's EBS volumes) and dependent
+  resources (EKS worker nodes) often arrive in *separate* commands, so a single
+  storage-/node-heavy resource can be **under-estimated**. The cumulative session
+  total partly compensates as those separate commands add up.
+- **Provisioning cost, not usage cost.** Usage-based services — S3, Lambda,
+  DynamoDB on-demand, data transfer, NAT data processing — can't be known before
+  the fact and are not priced.
+- **Estimates, not invoices.** It ignores Reserved Instances / Savings Plans; spot
+  is a rough ~70% off. A covered account may see over-estimates.
+- **Curated coverage.** It prices/warns the big bill-shock services; free creates
+  (security groups, tags) are intentionally silent.
 
 ## License
 
