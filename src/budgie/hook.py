@@ -5,10 +5,12 @@ settings.json:
       { "matcher": "Bash", "hooks": [
           { "type": "command", "command": "budgie hook", "timeout": 5 } ] } ] } }
 
-Schema (current): deny -> permissionDecision "deny"; a non-blocking warning ->
-permissionDecision "allow" + additionalContext; plain allow -> no output.
-A guard must never crash silently: on internal error we FAIL CLOSED for anything
-that looks like a spend command (override with BUDGIE_FAIL=open).
+Block mechanism: for a hard block we **exit 2** (Claude Code blocks the tool call
+and shows stderr to the agent) — the most robust, version-proof deny for a spend
+firewall. A non-blocking warning uses permissionDecision "allow" + additionalContext
+(exit 0). Plain allow: no output, exit 0.
+A guard must never crash silently: on internal error we FAIL CLOSED (exit 2) for
+anything that looks like a spend command (override with BUDGIE_FAIL=open).
 """
 from __future__ import annotations
 
@@ -40,16 +42,16 @@ def main() -> int:
     except Exception as exc:                         # never crash-open silently
         looks_spendy = any(m in f" {command.lower()} " for m in _SPEND_MARKERS)
         if looks_spendy and not fail_open:
-            _emit(permissionDecision="deny",
-                  permissionDecisionReason=(
-                      f"budgie: couldn't price this command ({exc.__class__.__name__}); "
-                      "blocked to be safe. Set BUDGIE_FAIL=open to allow through."))
+            print(f"budgie: couldn't price this command ({exc.__class__.__name__}); "
+                  "blocked to be safe. Set BUDGIE_FAIL=open to allow through.",
+                  file=sys.stderr)
+            return 2                                  # fail CLOSED
         return 0
 
     if decision.verdict == "block":
-        _emit(permissionDecision="deny",
-              permissionDecisionReason=f"budgie 🐦 {decision.reason}")
-    elif decision.verdict == "warn":
+        print(f"budgie 🐦 {decision.reason}", file=sys.stderr)
+        return 2                                      # exit 2 => Claude Code blocks it
+    if decision.verdict == "warn":
         _emit(permissionDecision="allow",
               additionalContext=f"budgie 🐦 ⚠ {decision.reason}")
     # allow -> emit nothing (implicit allow)

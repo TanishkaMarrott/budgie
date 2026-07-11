@@ -8,6 +8,18 @@ import sys
 from . import check, __version__
 
 
+def _session(_args) -> int:
+    from .state import _home, session_total
+    d = _home() / "sessions"
+    files = sorted(d.glob("*.json")) if d.exists() else []
+    if not files:
+        print("no sessions tracked yet"); return 0
+    for f in files:
+        t = session_total(f.stem)
+        print(f"  {f.stem}: ${t:.2f}/hr committed  (${t * 730:,.0f}/mo)")
+    return 0
+
+
 def _ledger(_args) -> int:
     from .state import _home
     f = _home() / "ledger.jsonl"
@@ -32,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--cap", type=float, default=2.0, help="hourly $ cap")
     sub.add_parser("hook", help="PreToolUse hook entry (reads JSON on stdin)")
     sub.add_parser("ledger", help="show recent decisions + spend stopped")
+    sub.add_parser("session", help="show cumulative $/hr committed per session")
     t = sub.add_parser("tf-plan", help="price a `terraform show -json` plan file")
     t.add_argument("file")
     t.add_argument("--cap", type=float, default=2.0)
@@ -45,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
         return hook_main()
     if args.cmd == "ledger":
         return _ledger(args)
+    if args.cmd == "session":
+        return _session(args)
     if args.cmd == "tf-plan":
         from pathlib import Path
         from .terraform import price_plan
