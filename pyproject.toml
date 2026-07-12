@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "budgie"
+name = "budgie-firewall"
 version = "0.1.0"
 description = "A spend firewall for AI agents — prices a cloud command before it runs and blocks the over-budget ones."
 readme = "README.md"

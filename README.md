@@ -1,31 +1,69 @@
 # 🐦 budgie
 
-**A spend firewall for AI agents.** budgie sits on your agent's shoulder and
-prices every cloud command *before it runs* — then blocks the ones that would
-blow your budget. Billing alerts tell you after the money's gone; budgie stops
-it at the door.
+**A spend firewall for AI agents.** budgie is a `PreToolUse` hook that prices an
+agent's cloud command *before it runs* — folding in **storage, node groups, and
+the session's cumulative burn**, not just the headline instance — and blocks the
+ones that breach your budget. Billing alerts fire after the money's gone; budgie
+stops the command at the door.
 
-> *"The little bird that stops your AI agent's big bill."*
+[![tests](https://github.com/TanishkaMarrott/budgie/actions/workflows/ci.yml/badge.svg)](https://github.com/TanishkaMarrott/budgie/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![deps](https://img.shields.io/badge/core%20deps-zero-brightgreen.svg)
 
-![budgie blocking a $143,547/mo command before it runs](docs/demo.gif)
+![budgie pricing an agent's command before it runs — a cheap db class blocked by 20 TB of storage, node groups priced, and the session's live burn](docs/demo.gif)
+
+The depth is in what it *sees*: below, a **cheap** `db.t3.micro` is blocked — not
+for the instance, but for the **20 TB of storage** attached to it. That's the
+difference between "block the big box" and understanding what a command costs.
 
 ## Demo
 
 ```console
+$ budgie check 'aws rds create-db-instance --db-instance-class db.t3.micro --allocated-storage 20000 --storage-type gp2'
+[BLOCK] 1× rds db.t3.micro ≈ $3.17/hr ($2,312/mo) — over the $2.00/hr session cap. Blocked.  [+20000GB gp2]
+
+$ budgie check 'aws eks create-nodegroup --instance-types m5.24xlarge --scaling-config desiredSize=40'
+[BLOCK] 40× eks m5.24xlarge ≈ $184.32/hr ($134,554/mo) — over the $2.00/hr session cap. Blocked.
+
 $ budgie check 'aws ec2 run-instances --instance-type p5.48xlarge --count 2'
 [BLOCK] 2× ec2 p5.48xlarge ≈ $196.64/hr ($143,547/mo) — over the $2.00/hr session cap. Blocked.
 
-$ budgie check 'for i in $(seq 100); do aws ec2 run-instances --instance-type p5.48xlarge; done'
-[BLOCK] 1× ec2 p5.48xlarge ≈ $98.32/hr ($71,774/mo) — over the $2.00/hr session cap. Blocked.
-
-$ budgie check 'aws rds create-db-instance --db-instance-class db.r5.24xlarge'
-[BLOCK] 1× rds db.r5.24xlarge ≈ $11.52/hr ($8,410/mo) — over the $2.00/hr session cap. Blocked.
-
 $ budgie check 'aws ec2 run-instances --instance-type t3.micro'
 [ALLOW] ≈ $0.01/hr — within budget.
+
+$ budgie session
+  agent-8f2: burning $4.61/hr  ·  accrued $13.83 so far
 ```
 
-Record the animated version with [`vhs`](https://github.com/charmbracelet/vhs): `vhs demo/demo.tape` → writes `docs/demo.gif`.
+Regenerate the animation with [`vhs`](https://github.com/charmbracelet/vhs): `vhs demo/demo.tape` → writes `docs/demo.gif`.
+
+## Architecture
+
+```
+  agent (Claude Code) ── Bash: aws / terraform / gcloud …
+        │
+        ├──────────────── PreToolUse ─────────────────┐
+        │  budgie hook                                 │
+        │    parse   find every aws cmd (loops, &&, ;) │  ← pure function,
+        │    price   static table | AWS Price List API │    no execution,
+        │    gate    active_rate + this cmd > cap?      │    no network*
+        │      ├─ over  → exit 2   ✗  command blocked  │
+        │      └─ under → allow, commit rate to session │
+        │                                              ▼
+        │                          session ledger  ($BUDGIE_HOME)
+        │                          active_rate $/hr · accrued_cost $
+        │                                              ▲
+        └──────────────── PostToolUse ────────────────┘
+           budgie posthook
+             reconcile   record created ids; on delete or
+                         failed-create, credit the burn back
+
+  * live pricing (AWS Price List API) is opt-in: pip install "budgie-firewall[aws]"
+```
+
+The core — `command → parse → price → verdict` — is a pure function over stdlib
+only. Pricing and reconciliation are seams around it.
 
 ---
 
@@ -98,8 +136,8 @@ active vs torn-down resources tracked separately.
 ## Install
 
 ```bash
-# from PyPI (once published)
-uvx budgie check "aws ec2 run-instances --instance-type p5.48xlarge --count 2"
+# from PyPI (once published) — package is budgie-firewall, the command is budgie
+uvx --from budgie-firewall budgie check "aws ec2 run-instances --instance-type p5.48xlarge --count 2"
 # [BLOCK] 2× ec2 p5.48xlarge ≈ $196.64/hr ($143,547/mo) — over the $2.00/hr cap.
 
 # or straight from GitHub, no PyPI needed:
@@ -119,7 +157,7 @@ Wire it as a `PreToolUse` hook (blocks before the spend):
 ```
 
 Set the cap with `BUDGIE_HOURLY=2.0`. Live AWS pricing (full SKU coverage):
-`pip install budgie[aws]` and `BUDGIE_PRICING=aws`.
+`pip install "budgie-firewall[aws]"` and `BUDGIE_PRICING=aws`.
 
 ## Commands
 

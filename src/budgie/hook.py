@@ -49,11 +49,11 @@ def main() -> int:
         return 0
 
     if decision.verdict == "block":
-        print(f"budgie 🐦 {decision.reason}", file=sys.stderr)
+        print(f"budgie: {decision.reason}", file=sys.stderr)
         return 2                                      # exit 2 => Claude Code blocks it
     if decision.verdict == "warn":
         _emit(permissionDecision="allow",
-              additionalContext=f"budgie 🐦 ⚠ {decision.reason}")
+              additionalContext=f"budgie: {decision.reason}")
     # allow -> emit nothing (implicit allow)
     return 0
 

@@ -7,37 +7,50 @@ Require budgie
 
 Set Shell "bash"
 Set FontSize 20
-Set Width 1320
-Set Height 760
-Set Padding 24
-Set Theme "Dracula"
-Set TypingSpeed 30ms
+Set Width 1360
+Set Height 800
+Set Padding 28
+Set TypingSpeed 28ms
+Set Theme { "name": "budgie", "background": "#0d1117", "foreground": "#c9d1d9", "black": "#0d1117", "red": "#ff7b72", "green": "#3fb950", "yellow": "#d29922", "blue": "#58a6ff", "purple": "#bc8cff", "cyan": "#39c5cf", "white": "#c9d1d9", "brightBlack": "#6e7681", "brightRed": "#ffa198", "brightGreen": "#56d364", "brightYellow": "#e3b341", "brightBlue": "#79c0ff", "brightPurple": "#d2a8ff", "brightCyan": "#56d4dd", "brightWhite": "#f0f6fc", "selection": "#284566", "cursor": "#c9d1d9" }
 
-Type "# 🐦 budgie — a spend firewall for AI agents"
-Enter
-Sleep 800ms
+# BUDGIE_HOURLY + BUDGIE_HOME are exported (and the session pre-seeded) by the
+# caller before `vhs demo/demo.tape`, so the shell here inherits them cleanly.
 
-Type "# an agent tries to launch 2× the biggest GPU box..."
+Type "# budgie prices an agent's cloud command before it runs, per session."
 Enter
-Sleep 800ms
+Sleep 900ms
+
+Type "# a cheap db class — but 20 TB of storage flips it over the cap:"
+Enter
+Sleep 700ms
+Type "budgie check 'aws rds create-db-instance --db-instance-class db.t3.micro --allocated-storage 20000 --storage-type gp2'"
+Enter
+Sleep 2600ms
+
+Type "# node groups are priced too — 40 nodes, not just the control plane:"
+Enter
+Sleep 700ms
+Type "budgie check 'aws eks create-nodegroup --instance-types m5.24xlarge --scaling-config desiredSize=40'"
+Enter
+Sleep 2600ms
+
+Type "# the obvious one — 2x the biggest GPU box — never runs:"
+Enter
+Sleep 700ms
 Type "budgie check 'aws ec2 run-instances --instance-type p5.48xlarge --count 2'"
 Enter
-Sleep 2500ms
+Sleep 2600ms
 
-Type "# ...blocked before it runs. and it sees loops, too:"
+Type "# a small box passes straight through:"
 Enter
-Sleep 600ms
-Type "budgie check 'for i in $(seq 100); do aws ec2 run-instances --instance-type p5.48xlarge; done'"
-Enter
-Sleep 2500ms
-
-Type "# a cheap box passes straight through:"
-Enter
-Sleep 600ms
+Sleep 700ms
 Type "budgie check 'aws ec2 run-instances --instance-type t3.micro'"
 Enter
-Sleep 2500ms
+Sleep 2200ms
 
-Type "# it's a PreToolUse hook — the command never even executes."
+Type "# the session tracks live burn and dollars already spent, separately:"
 Enter
-Sleep 2000ms
+Sleep 700ms
+Type "budgie session"
+Enter
+Sleep 3000ms
