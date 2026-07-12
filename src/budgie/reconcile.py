@@ -1,15 +1,18 @@
-"""PostToolUse reconciliation — keep the session's active burn honest AFTER a
-command runs, with no AWS polling.
+"""PostToolUse reconciliation — the FACTUAL side of the ledger, with no AWS polling.
 
-PreToolUse commits a create's rate to active_rate (before the resource exists).
-This runs after the command and reads its own output/args:
-  • create succeeded → record {resource_id: rate} so a later delete can credit it
-  • create FAILED    → release the rate PreToolUse committed (nothing was made)
+PreToolUse only *decides*; it commits nothing. This runs at PostToolUse, which
+Claude Code fires ONLY when a command succeeds — so everything here is a fact:
+  • create succeeded → COMMIT its rate to the session + record {id: rate} so a
+    later delete can credit it back
   • delete succeeded → release_by_id for each id named in the delete command
 
+Because a FAILED command fires no PostToolUse hook at all (verified live on
+2.1.121 — and no PostToolUseFailure either), a failed create simply never reaches
+here and never counts. There is no phantom commit to roll back — we never wrote one.
+
 Covers agent-driven creates/deletes. Out-of-band deletes (console, TTL,
-autoscaling) are out of scope — that's a platform's job (snapshot polling).
-"""
+autoscaling) are out of scope — that's a platform's job (snapshot polling)."""
+
 from __future__ import annotations
 
 import json
@@ -31,8 +34,16 @@ _DELETE_IDS = {
     "delete-load-balancer": "load-balancer-arn",
 }
 # id keys AWS returns in create output JSON
-_ID_KEYS = ("InstanceId", "DBInstanceIdentifier", "NatGatewayId", "VolumeId",
-            "NodegroupName", "ClusterName", "CacheClusterId", "LoadBalancerArn")
+_ID_KEYS = (
+    "InstanceId",
+    "DBInstanceIdentifier",
+    "NatGatewayId",
+    "VolumeId",
+    "NodegroupName",
+    "ClusterName",
+    "CacheClusterId",
+    "LoadBalancerArn",
+)
 _ID_RE = re.compile(r"\b(i-[0-9a-f]{6,}|nat-[0-9a-f]{6,}|vol-[0-9a-f]{6,})\b")
 
 
@@ -74,7 +85,8 @@ def _delete_targets(command: str) -> list[str]:
         if _parse._is_aws(tokens[i]):
             j, span = i + 1, []
             while j < n and not _parse._is_aws(tokens[j]) and tokens[j] not in _parse._BOUNDARY:
-                span.append(tokens[j]); j += 1
+                span.append(tokens[j])
+                j += 1
             if len(span) >= 2:
                 flags = _parse._split_flags(span[2:])
                 idflag = _DELETE_IDS.get(span[1])
@@ -86,30 +98,28 @@ def _delete_targets(command: str) -> list[str]:
     return targets
 
 
-def reconcile(command: str, output: str, success: bool, session_id: str) -> dict:
-    """Post-execution: keep the session's active burn honest."""
-    intents = _parse.extract(command)                    # a priced CREATE?
+def reconcile(command: str, output: str, session_id: str) -> dict:
+    """Post-execution (success is implicit — PostToolUse only fires on success):
+    commit a create's cost now that it's a fact, or credit a delete."""
+    intents = _parse.extract(command)  # a priced CREATE?
     if intents:
         ests = [_estimate(i) for i in intents]
         rate = sum(e.total_hourly for e in ests if e.total_hourly is not None)
-        if not success:
-            if rate:
-                state.release_active(session_id, rate)   # undo the PreToolUse commit
-            return {"action": "create-failed-release", "rate": rate}
+        if rate:
+            state._commit(session_id, rate)  # count the spend — it succeeded
         ids = _created_ids(output)
         if ids and rate:
             per = round(rate / len(ids), 6)
             for rid in ids:
                 state.record_resource(session_id, rid, per)
-        return {"action": "create-recorded", "ids": ids, "rate": rate}
+        return {"action": "create-committed", "ids": ids, "rate": rate}
 
-    if success:                                          # a DELETE?
-        freed, got = 0.0, []
-        for rid in _delete_targets(command):
-            f = state.release_by_id(session_id, rid)
-            if f:
-                freed += f
-                got.append(rid)
-        if got:
-            return {"action": "delete-credited", "ids": got, "freed": round(freed, 6)}
+    freed, got = 0.0, []  # a DELETE?
+    for rid in _delete_targets(command):
+        f = state.release_by_id(session_id, rid)
+        if f:
+            freed += f
+            got.append(rid)
+    if got:
+        return {"action": "delete-credited", "ids": got, "freed": round(freed, 6)}
     return {"action": "noop"}

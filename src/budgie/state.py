@@ -112,8 +112,8 @@ def release_active(sid: str, hourly: float) -> None:
 
 
 def record_resource(sid: str, resource_id: str, rate: float) -> None:
-    """Associate a just-created resource id with the rate already committed at
-    PreToolUse. Doesn't touch active_rate — only enables later release-by-id."""
+    """Associate a just-created resource id with its rate (committed alongside, at
+    PostToolUse). Doesn't touch active_rate — only enables later release-by-id."""
     s = _read(sid)
     s["resources"][resource_id] = round(float(rate), 6)
     _write(sid, s)
@@ -196,8 +196,14 @@ def _ledger(entry: dict) -> None:
 
 
 def evaluate(command: str, cap_hourly: float, session_id: str = "") -> Decision:
-    """Stateful gate: cumulative budget + override + ledger. Commits the cost of
-    anything not blocked, so the session running-total reflects what will run."""
+    """Stateful gate (PreToolUse): cumulative budget + override + ledger.
+
+    DECIDES only — it does NOT commit the cost. Anticipation (a prediction about a
+    resource that doesn't exist yet) must never pollute the factual session ledger:
+    a command can be blocked, fail, or be a dry-run. The cost is committed later, at
+    PostToolUse (`reconcile`), which fires ONLY on success — so failed creates never
+    count. (Claude Code fires no hook at all when a command fails, so there is no
+    way to roll a phantom commit back; the fix is to never write it.)"""
     intents = _parse.extract(command)
     estimates = [_estimate(i) for i in intents]
     in_loop = any(i.in_loop for i in intents)
@@ -207,7 +213,8 @@ def evaluate(command: str, cap_hourly: float, session_id: str = "") -> Decision:
 
     if intents and (os.environ.get("BUDGIE_OK") or _allowlisted(command)):
         decision = Decision(
-            "allow", f"override — committing ${cmd_hourly:.2f}/hr (session " f"${prior + cmd_hourly:.2f}/hr)."
+            "allow",
+            f"override — allowing ${cmd_hourly:.2f}/hr (session would reach " f"${prior + cmd_hourly:.2f}/hr).",
         )
     elif intents:
         decision = aggregate(estimates, cap_hourly, in_loop, committed=prior, unbounded=unbounded)
@@ -231,6 +238,5 @@ def evaluate(command: str, cap_hourly: float, session_id: str = "") -> Decision:
         }
     )
 
-    if decision.verdict != "block" and cmd_hourly > 0:
-        _commit(session_id, cmd_hourly)
+    # NB: no commit here — see the docstring. Committing happens at PostToolUse.
     return decision
