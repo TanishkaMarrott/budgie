@@ -127,11 +127,16 @@ on every event (create / teardown):
                                                      accrued = Σ (rate × Δt)
 ```
 
-The **cap is checked against `active_rate`** (max concurrent burn), so two
-individually-cheap boxes can still trip it together; `accrued_cost` is the real
-dollars spent so far and projects to expiry. `budgie session` prints both.
-This mirrors KML's `cost_estimator` accrual — rate and cost kept distinct, with
-active vs torn-down resources tracked separately.
+Both are **enforced**, and you choose which:
+- `BUDGIE_HOURLY` checks **`active_rate`** (max concurrent burn) — two
+  individually-cheap boxes can still trip it together.
+- `BUDGIE_BUDGET` checks the **cumulative total** — `accrued_cost` (real dollars
+  spent) plus what's still running, projected over `BUDGIE_HORIZON`. Because
+  torn-down resources keep their spent dollars in `accrued_cost`, create/tear-down
+  churn is counted, not laundered.
+
+`budgie session` prints both. This mirrors KML's `cost_estimator` accrual — rate
+and cost kept distinct, with active vs torn-down resources tracked separately.
 
 ## Install
 
@@ -156,8 +161,17 @@ Wire it as a `PreToolUse` hook (blocks before the spend):
 } }
 ```
 
-Set the cap with `BUDGIE_HOURLY=2.0`. Live AWS pricing (full SKU coverage):
-`pip install "budgie-firewall[aws]"` and `BUDGIE_PRICING=aws`.
+Two caps, use either or both:
+
+- **`BUDGIE_HOURLY=2.0`** — a **rate** ceiling: never let the session burn faster
+  than $2/hr at once.
+- **`BUDGIE_BUDGET=1.0`** — a **cumulative total**: the net sum of dollars already
+  spent plus everything still running (projected over `BUDGIE_HORIZON`, default
+  1h) may never cross $1. This is what catches slow accrual and create/tear-down
+  churn that a rate cap alone misses.
+
+Live AWS pricing (full SKU coverage): `pip install "budgie-firewall[aws]"` and
+`BUDGIE_PRICING=aws`.
 
 ## Commands
 
@@ -178,10 +192,16 @@ budgie ledger                # recent decisions + total spend stopped
   hidden — Fargate, Aurora, EMR, MSK, `--cli-input-json`, `terraform apply`.
 - ✅ Extracts **every** `aws` invocation from **loops / `&&` / `;` / xargs / full
   paths**; handles `--dry-run`, **spot** (~70% off), **region**, robust `--count 1:5`.
+- ✅ **Prices the whole loop, not one iteration** — `for i in $(seq 100); do …`
+  is costed as 100×, so the $6,531 runaway-loop pattern **blocks**. A loop with no
+  bounded count (`while` / `xargs` / a dynamic range) that creates billable
+  resources is refused outright — cost can't be bounded.
 - ✅ **Blocks via exit code 2** (version-proof hard deny); warns are non-blocking
   hints; allow is silent. Crash-proof, **fail-closed** on spend commands.
-- ✅ **Cumulative session budget** — tracks the session's **active run-rate ($/hr)**
-  and **accrued cost ($ = rate × time)** *separately*. `budgie session` shows both.
+- ✅ **Two enforced caps** — a **rate** ceiling (`BUDGIE_HOURLY`, $/hr) *and* a
+  **cumulative total** (`BUDGIE_BUDGET`, $): the net sum of dollars spent + running,
+  projected over a horizon. Rate and accrued cost are tracked *separately* (the KML
+  model); `budgie session` shows both.
 - ✅ **PostToolUse reconciliation** — records created resource ids and **credits the
   burn back** when the agent deletes them (or when a create fails); teardown does
   the same. No AWS polling.

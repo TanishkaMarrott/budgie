@@ -41,9 +41,10 @@ def test_loop_is_caught():
     cmd = "for i in 1 2 3; do aws ec2 run-instances --instance-type p5.48xlarge; done"
     assert v(cmd) == "block"          # was ALLOW before the fix — the $6,531 scenario
 
-def test_loop_warns_even_when_cheap():
+def test_loop_prices_every_iteration():
+    # cheap per-iter, but 100 of them = $8.32/hr — must BLOCK, not just warn.
     cmd = "for i in $(seq 100); do aws ec2 run-instances --instance-type t3.large; done"
-    assert v(cmd) == "warn"           # cheap per-iter, but a loop repeats it
+    assert v(cmd) == "block"          # was WARN before the loop-multiplier fix
 
 def test_chain_and():
     assert v("aws s3 ls && aws ec2 run-instances --instance-type m5.24xlarge") == "block"

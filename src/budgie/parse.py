@@ -6,8 +6,10 @@ when a known spend action hides its params (`--cli-input-json`) it is returned
 as unpriceable so the gate warns instead of silently allowing. Detects
 --dry-run (no charge), spot, region, and robust quantities (`--count 1:5`).
 """
+
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass
 
@@ -18,22 +20,26 @@ _SKU_ACTIONS = {
     "create-cache-cluster": ("elasticache", "cache-node-type"),
     "create-notebook-instance": ("sagemaker", "instance-type"),
 }
-_REDSHIFT = ("redshift", "node-type")            # redshift create-cluster (disambiguated)
-_FLAT_ACTIONS = {                                # $/hr independent of size
+_REDSHIFT = ("redshift", "node-type")  # redshift create-cluster (disambiguated)
+_FLAT_ACTIONS = {  # $/hr independent of size
     "create-nat-gateway": "nat-gateway",
-    "create-cluster": "eks-cluster",             # eks create-cluster
+    "create-cluster": "eks-cluster",  # eks create-cluster
     "create-load-balancer": "load-balancer",
     "allocate-address": "elastic-ip-idle",
 }
 # (service, action) that are billable but hide their sizing in a task def / nested
 # config / separate resource — we can't price them, so WARN (never silent-allow).
 _WARN_ACTIONS = {
-    ("ecs", "run-task"), ("ecs", "create-service"),          # Fargate: cost in task def
-    ("rds", "create-db-cluster"),                            # Aurora: instances/serverless
-    ("emr", "create-cluster"), ("emr", "run-job-flow"),
-    ("sagemaker", "create-endpoint"), ("sagemaker", "create-training-job"),
+    ("ecs", "run-task"),
+    ("ecs", "create-service"),  # Fargate: cost in task def
+    ("rds", "create-db-cluster"),  # Aurora: instances/serverless
+    ("emr", "create-cluster"),
+    ("emr", "run-job-flow"),
+    ("sagemaker", "create-endpoint"),
+    ("sagemaker", "create-training-job"),
     ("sagemaker", "create-transform-job"),
-    ("kafka", "create-cluster"), ("mq", "create-broker"),
+    ("kafka", "create-cluster"),
+    ("mq", "create-broker"),
     ("elasticache", "create-replication-group"),
     ("redshift-serverless", "create-workgroup"),
 }
@@ -65,13 +71,13 @@ def _rds_storage(it: "Intent", flags: dict) -> None:
 class Intent:
     service: str
     action: str
-    table: str                 # ec2/rds/redshift/elasticache/flat/unknown
+    table: str  # ec2/rds/redshift/elasticache/flat/unknown
     sku: str | None
     qty: int = 1
     region: str = "us-east-1"
     spot: bool = False
     dry_run: bool = False
-    priceable: bool = True      # False => params hidden => gate must warn, never allow
+    priceable: bool = True  # False => params hidden => gate must warn, never allow
     reason: str = ""
     in_loop: bool = False
     raw: str = ""
@@ -80,6 +86,9 @@ class Intent:
     storage_type: str = "gp2"
     iops: int = 0
     multi_az: bool = False
+    # a loop with no statically-bounded iteration count (while/until/xargs/dynamic
+    # range) — total cost can't be computed, so the gate blocks rather than guesses.
+    unbounded: bool = False
 
 
 def _tokenize(command: str) -> list[str]:
@@ -88,11 +97,12 @@ def _tokenize(command: str) -> list[str]:
     except ValueError:
         toks = command.split()
     out: list[str] = []
-    for t in toks:                       # split trailing ';' into its own boundary token
+    for t in toks:  # split trailing ';' into its own boundary token
         if t == ";":
             out.append(";")
         elif t.endswith(";") and len(t) > 1:
-            out.append(t[:-1]); out.append(";")
+            out.append(t[:-1])
+            out.append(";")
         else:
             out.append(t)
     return out
@@ -106,9 +116,11 @@ def _split_flags(tokens: list[str]) -> dict[str, str]:
         if t.startswith("--"):
             key = t[2:]
             if "=" in key:
-                k, v = key.split("=", 1); flags[k] = v
+                k, v = key.split("=", 1)
+                flags[k] = v
             elif i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
-                flags[key] = tokens[i + 1]; i += 1
+                flags[key] = tokens[i + 1]
+                i += 1
             else:
                 flags[key] = ""
         i += 1
@@ -118,7 +130,7 @@ def _split_flags(tokens: list[str]) -> dict[str, str]:
 def _qty(flags: dict[str, str]) -> int:
     for k in _QTY_FLAGS:
         if flags.get(k):
-            v = flags[k].split(":")[-1]          # "min:max" -> max
+            v = flags[k].split(":")[-1]  # "min:max" -> max
             try:
                 return max(1, int(v))
             except ValueError:
@@ -128,11 +140,18 @@ def _qty(flags: dict[str, str]) -> int:
 
 def _mk(service, action, table, sku, flags, in_loop, raw, priceable=True, reason=""):
     return Intent(
-        service=service, action=action, table=table, sku=sku,
-        qty=_qty(flags), region=flags.get("region", "us-east-1"),
+        service=service,
+        action=action,
+        table=table,
+        sku=sku,
+        qty=_qty(flags),
+        region=flags.get("region", "us-east-1"),
         spot=("instance-market-options" in flags and "spot" in raw.lower()),
-        dry_run=("dry-run" in flags), priceable=priceable, reason=reason,
-        in_loop=in_loop, raw=raw,
+        dry_run=("dry-run" in flags),
+        priceable=priceable,
+        reason=reason,
+        in_loop=in_loop,
+        raw=raw,
     )
 
 
@@ -164,7 +183,9 @@ def _parse_invocation(span: list[str], in_loop: bool, raw: str) -> Intent | None
             cnt = _kv(cc, "InstanceCount")
             it.qty = int(cnt) if cnt and cnt.isdigit() else 1
             return it
-        return warn("params in --cli-input-json") if unpriceable else warn("OpenSearch instance not in --cluster-config")
+        return (
+            warn("params in --cli-input-json") if unpriceable else warn("OpenSearch instance not in --cluster-config")
+        )
 
     # RDS instance — price the class + attached storage (+ Multi-AZ doubling).
     if action == "create-db-instance" and service == "rds":
@@ -227,19 +248,55 @@ def _is_aws(tok: str) -> bool:
     return tok.rsplit("/", 1)[-1] in ("aws", "aws2")
 
 
+def _loop_multiplier(command: str) -> int | None:
+    """How many times a loop body runs, when statically determinable — so a
+    `for i in $(seq 100)` create is priced as 100, not 1 (the $6,531 pattern).
+    Returns the count (>=1), or None when it can't be bounded (while/until/xargs
+    or a dynamic range like `$(cat hosts)`) — the caller treats None as unbounded."""
+    if re.search(r"\b(while|until)\b", command) or re.search(r"\bxargs\b", command):
+        return None
+    m = re.search(r"\bfor\b\s+\w+\s+in\s+(.*?)\s*;?\s*\bdo\b", command, re.DOTALL)
+    if not m:
+        return None
+    items = m.group(1).strip()
+    sm = re.search(r"\bseq\s+(\d+)(?:\s+(\d+))?(?:\s+(\d+))?", items)  # seq N | A B | A STEP B
+    if sm:
+        nums = [int(x) for x in sm.groups() if x is not None]
+        if len(nums) == 1:
+            return max(1, nums[0])
+        if len(nums) == 2:
+            return max(1, nums[1] - nums[0] + 1)
+        a, step, b = nums
+        return max(1, (b - a) // step + 1) if step else 1
+    bm = re.search(r"\{(\d+)\.\.(\d+)\}", items)  # brace expansion {1..N}
+    if bm:
+        return max(1, abs(int(bm.group(2)) - int(bm.group(1))) + 1)
+    if "$(" not in items and "`" not in items and "*" not in items and items:  # literal list
+        toks = items.split()
+        if toks and all(not t.startswith("$") for t in toks):
+            return max(1, len(toks))
+    return None  # dynamic range -> unbounded
+
+
 def extract(command: str) -> list[Intent]:
     """Every aws spend invocation in an arbitrary bash string."""
     tokens = _tokenize(command)
     in_loop = any(t in _LOOP for t in tokens)
+    mult = _loop_multiplier(command) if in_loop else 1
     intents: list[Intent] = []
     n, i = len(tokens), 0
     while i < n:
         if _is_aws(tokens[i]):
             j, span = i + 1, []
             while j < n and not _is_aws(tokens[j]) and tokens[j] not in _BOUNDARY:
-                span.append(tokens[j]); j += 1
+                span.append(tokens[j])
+                j += 1
             got = _parse_invocation(span, in_loop, command)
             if got:
+                if in_loop and mult is None:  # loop we can't bound
+                    got.unbounded = True
+                elif in_loop and mult and mult > 1:  # bounded loop -> price every iteration
+                    got.qty *= mult
                 intents.append(got)
             i = j if j > i else i + 1
         else:

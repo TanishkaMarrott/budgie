@@ -11,6 +11,7 @@ it with the things a real guard needs across a whole agent run:
 
 State lives under $BUDGIE_HOME (default `.budgie`).
 """
+
 from __future__ import annotations
 
 import datetime
@@ -31,7 +32,7 @@ def _session_file(sid: str) -> Path:
     return _home() / "sessions" / f"{sid or 'default'}.json"
 
 
-_DELTA_CAP_H = 24.0     # cap one interval's accrual so a long gap can't explode it
+_DELTA_CAP_H = 24.0  # cap one interval's accrual so a long gap can't explode it
 
 
 def _read(sid: str) -> dict:
@@ -42,10 +43,12 @@ def _read(sid: str) -> dict:
     if f.exists():
         try:
             d = json.loads(f.read_text())
-            return {"active_rate": float(d.get("active_rate", 0.0)),
-                    "accrued_cost": float(d.get("accrued_cost", 0.0)),
-                    "last_ts": d.get("last_ts"),
-                    "resources": dict(d.get("resources", {}))}
+            return {
+                "active_rate": float(d.get("active_rate", 0.0)),
+                "accrued_cost": float(d.get("accrued_cost", 0.0)),
+                "last_ts": d.get("last_ts"),
+                "resources": dict(d.get("resources", {})),
+            }
         except (json.JSONDecodeError, ValueError, OSError):
             pass
     return {"active_rate": 0.0, "accrued_cost": 0.0, "last_ts": None, "resources": {}}
@@ -54,10 +57,16 @@ def _read(sid: str) -> dict:
 def _write(sid: str, s: dict) -> None:
     f = _session_file(sid)
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps({"active_rate": round(s["active_rate"], 6),
-                             "accrued_cost": round(s["accrued_cost"], 6),
-                             "last_ts": s["last_ts"],
-                             "resources": s.get("resources", {})}))
+    f.write_text(
+        json.dumps(
+            {
+                "active_rate": round(s["active_rate"], 6),
+                "accrued_cost": round(s["accrued_cost"], 6),
+                "last_ts": s["last_ts"],
+                "resources": s.get("resources", {}),
+            }
+        )
+    )
 
 
 def _accrue(s: dict, now: "datetime.datetime") -> dict:
@@ -125,6 +134,46 @@ def reset_session(sid: str) -> None:
     _session_file(sid).unlink(missing_ok=True)
 
 
+def _env_float(name: str, default: float | None = None) -> float | None:
+    v = os.environ.get(name)
+    if not v:
+        return default
+    try:
+        return float(v)
+    except ValueError:
+        return default
+
+
+def _budget_decision(
+    sid: str, estimates: list, prior: float, cmd_hourly: float, budget: float, base: Decision
+) -> Decision:
+    """Cumulative TOTAL-dollar gate (enforced only when BUDGIE_BUDGET is set).
+    The net sum of what's been performed = dollars already spent + everything
+    still running projected over a horizon. Blocks when that would cross the
+    session's total budget — so create/tear-down churn and slow accrual are both
+    counted, not just the instantaneous rate."""
+    horizon = _env_float("BUDGIE_HORIZON", 1.0) or 1.0
+    accrued = session_accrued(sid)  # dollars already spent, to now
+    projected = accrued + (prior + cmd_hourly) * horizon
+    known = [e for e in estimates if e.total_hourly is not None]
+    top = max(known, key=lambda e: e.total_hourly).resource if known else "this command"
+    hz = f"{horizon:g}h"
+    if projected > budget:
+        return Decision(
+            "block",
+            f"{top} would put the session at ~${projected:.2f} projected over {hz} "
+            f"(${accrued:.2f} spent + ${prior + cmd_hourly:.2f}/hr running) — over the "
+            f"${budget:.2f} session budget. Blocked.",
+        )
+    if projected > 0.8 * budget and base.verdict == "allow":
+        return Decision(
+            "warn",
+            f"{top} brings the session to ~${projected:.2f} over {hz} — approaching "
+            f"the ${budget:.2f} session budget (${accrued:.2f} spent).",
+        )
+    return base
+
+
 def _allowlisted(command: str) -> bool:
     f = _home() / "allow.txt"
     if not f.exists():
@@ -152,28 +201,35 @@ def evaluate(command: str, cap_hourly: float, session_id: str = "") -> Decision:
     intents = _parse.extract(command)
     estimates = [_estimate(i) for i in intents]
     in_loop = any(i.in_loop for i in intents)
+    unbounded = any(i.unbounded for i in intents)
     cmd_hourly = sum(e.total_hourly for e in estimates if e.total_hourly is not None)
     prior = session_total(session_id)
 
     if intents and (os.environ.get("BUDGIE_OK") or _allowlisted(command)):
-        decision = Decision("allow",
-            f"override — committing ${cmd_hourly:.2f}/hr (session "
-            f"${prior + cmd_hourly:.2f}/hr).")
+        decision = Decision(
+            "allow", f"override — committing ${cmd_hourly:.2f}/hr (session " f"${prior + cmd_hourly:.2f}/hr)."
+        )
     elif intents:
-        decision = aggregate(estimates, cap_hourly, in_loop, committed=prior)
+        decision = aggregate(estimates, cap_hourly, in_loop, committed=prior, unbounded=unbounded)
+        budget = _env_float("BUDGIE_BUDGET")  # cumulative total-$ gate (opt-in)
+        if budget is not None and cmd_hourly > 0 and decision.verdict != "block":
+            decision = _budget_decision(session_id, estimates, prior, cmd_hourly, budget, decision)
     else:
         from . import check
+
         decision = check(command, cap_hourly)
 
-    _ledger({
-        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-        "session": session_id or "default",
-        "verdict": decision.verdict,
-        "command_hourly": round(cmd_hourly, 4),
-        "session_hourly_before": round(prior, 4),
-        "command": command[:200],
-        "reason": decision.reason,
-    })
+    _ledger(
+        {
+            "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+            "session": session_id or "default",
+            "verdict": decision.verdict,
+            "command_hourly": round(cmd_hourly, 4),
+            "session_hourly_before": round(prior, 4),
+            "command": command[:200],
+            "reason": decision.reason,
+        }
+    )
 
     if decision.verdict != "block" and cmd_hourly > 0:
         _commit(session_id, cmd_hourly)
