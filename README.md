@@ -1,10 +1,10 @@
 # 🐦 budgie
 
-**A spend firewall for AI agents.** budgie is a `PreToolUse` hook that prices an
-agent's cloud command *before it runs* — folding in **storage, node groups, and
-the session's cumulative burn**, not just the headline instance — and blocks the
-ones that breach your budget. Billing alerts fire after the money's gone; budgie
-stops the command at the door.
+**A spend firewall for AI agents.** budgie is a Claude Code hook that prices an
+agent's cloud command *before it runs* — folding in **storage, node groups, whole
+loops, and the session's cumulative burn**, not just the headline instance — and
+blocks the ones that breach your budget. Billing alerts fire after the money's
+gone; budgie stops the command at the door.
 
 [![tests](https://github.com/TanishkaMarrott/budgie/actions/workflows/ci.yml/badge.svg)](https://github.com/TanishkaMarrott/budgie/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -38,32 +38,44 @@ $ budgie session
 
 Regenerate the animation with [`vhs`](https://github.com/charmbracelet/vhs): `vhs demo/demo.tape` → writes `docs/demo.gif`.
 
-## Architecture
+## Architecture — a gate and a ledger, kept apart
+
+budgie is two hooks with one discipline between them: **anticipate to decide,
+account to record — and never let the two cross.**
 
 ```
   agent (Claude Code) ── Bash: aws / terraform / gcloud …
         │
-        ├──────────────── PreToolUse ─────────────────┐
-        │  budgie hook                                 │
-        │    parse   find every aws cmd (loops, &&, ;) │  ← pure function,
-        │    price   static table | AWS Price List API │    no execution,
-        │    gate    active_rate + this cmd > cap?      │    no network*
-        │      ├─ over  → exit 2   ✗  command blocked  │
-        │      └─ under → allow, commit rate to session │
-        │                                              ▼
-        │                          session ledger  ($BUDGIE_HOME)
-        │                          active_rate $/hr · accrued_cost $
-        │                                              ▲
-        └──────────────── PostToolUse ────────────────┘
-           budgie posthook
-             reconcile   record created ids; on delete or
-                         failed-create, credit the burn back
+        ├──────────────── PreToolUse ──────────────────┐   the GATE — anticipation
+        │  budgie hook                                  │   prices a resource that
+        │    parse   every aws cmd (loops, &&, ;, xargs)│   doesn't exist yet; the
+        │    price   static table | AWS Price List API  │   estimate is used only to
+        │    gate    accrued + running + this cmd > cap?│   decide, then discarded —
+        │      ├─ over  → exit 2  ✗  blocked (never runs)   it commits NOTHING
+        │      └─ under → allow (exit 0), command runs  │
+        │                                               ▼
+        │                       session ledger  ($BUDGIE_HOME)
+        │                       active_rate $/hr · accrued_cost $
+        │                                               ▲
+        └──────────────── PostToolUse ─────────────────┘   the LEDGER — accounting
+           budgie posthook                                 fires ONLY on success, so
+             create succeeded → COMMIT its cost + record id  only real spend is ever
+             delete succeeded → credit the cost back         written down
 
-  * live pricing (AWS Price List API) is opt-in: pip install "budgie-firewall[aws]"
+  * pricing via AWS Price List API is opt-in: pip install "budgie-firewall[aws]"
 ```
 
-The core — `command → parse → price → verdict` — is a pure function over stdlib
-only. Pricing and reconciliation are seams around it.
+**Why the split matters.** The gate *anticipates* — it prices a command that
+hasn't run and may be blocked, fail, or be a dry-run, so it must not write
+anything down. The ledger *accounts* — Claude Code fires PostToolUse only when a
+command **succeeds**, so a create counts only once it's real; a failed create
+fires no hook and never touches the total. (Verified live on Claude Code 2.1.121:
+a failed command fires *no* PostToolUse — and no `PostToolUseFailure` either.)
+Keeping a prediction out of the factual ledger is what stops **phantom spend** —
+money that was never spent — from wrongly blocking later, legitimate commands.
+
+The gate itself (`command → parse → price → verdict`) is a pure function over the
+stdlib. Pricing and the ledger are seams around it.
 
 ---
 
@@ -80,25 +92,25 @@ AWS bill**. Every existing guardrail is too late or too coarse:
 
 **None block the specific money-spending command, at agent runtime, before it runs.** That's budgie.
 
-## How it works
+## The decision
 
 ```
 agent about to run:  aws ec2 run-instances --instance-type p5.48xlarge --count 2
         │
-        ▼   PreToolUse hook (budgie)
-   parse → find every aws command (loops, &&, ;, /path/aws)   [no execution]
+        ▼   PreToolUse hook (budgie) — no execution, no network
+   parse → find every aws command (loops, &&, ;, xargs, /path/aws)
    price → 2 × $98.32/hr = $196.64/hr  ($143,547/mo)
-   add to the session's active run-rate → over the $2/hr cap?
+   gate  → dollars spent + running + this command  >  the cap?
         │
         ├─ yes → exit code 2  ✗   Claude Code blocks it; the command never runs
-        └─ no  → allow (exit 0) → commit the rate to the session
+        └─ no  → allow (exit 0); the command runs, and PostToolUse commits its
+                 cost to the session — only once it has actually succeeded
 ```
 
-budgie **inspects** the command and decides allow/deny — it never runs the
-command itself (that stays with the agent, only if budgie allows). A hard block
-uses **exit code 2** (the version-proof deny); a *warn* is a non-blocking hint;
-*allow* is silent. The core is a pure function: `command → parse → price →
-verdict`. No AWS SDK, no network.
+budgie **inspects** and decides allow/deny — it never runs the command itself
+(that stays with the agent, only if budgie allows). A hard block uses **exit
+code 2** (the version-proof deny); a *warn* is a non-blocking hint; *allow* is
+silent. No AWS SDK, no network on the decision path.
 
 ## Session accrual (cumulative cost)
 
@@ -149,15 +161,16 @@ uvx --from budgie-firewall budgie check "aws ec2 run-instances --instance-type p
 uvx --from git+https://github.com/TanishkaMarrott/budgie budgie check "aws ec2 run-instances --instance-type p5.48xlarge"
 ```
 
-Wire it as a `PreToolUse` hook (blocks before the spend):
+Wire **both** hooks — PreToolUse blocks before the spend, PostToolUse commits it
+after success (required for cumulative budgets):
 
 ```jsonc
 // .claude/settings.json
 { "hooks": {
     "PreToolUse":  [ { "matcher": "Bash", "hooks": [
-        { "type": "command", "command": "budgie hook" } ] } ],
+        { "type": "command", "command": "budgie hook" } ] } ],      // the gate — blocks (exit 2)
     "PostToolUse": [ { "matcher": "Bash", "hooks": [
-        { "type": "command", "command": "budgie posthook" } ] } ]   // keeps the burn honest
+        { "type": "command", "command": "budgie posthook" } ] } ]   // the ledger — commits succeeded spend
 } }
 ```
 
@@ -178,7 +191,7 @@ Live AWS pricing (full SKU coverage): `pip install "budgie-firewall[aws]"` and
 ```
 budgie check "<command>"     # price + gate one command
 budgie hook                  # PreToolUse hook entry — prices + gates (exit 2 blocks)
-budgie posthook              # PostToolUse hook — reconciles the session burn
+budgie posthook              # PostToolUse hook — commits succeeded spend, credits deletes
 budgie tf-plan plan.json     # price a `terraform show -json` plan
 budgie session               # show each session's burn ($/hr) and accrued ($)
 budgie ledger                # recent decisions + total spend stopped
@@ -202,9 +215,10 @@ budgie ledger                # recent decisions + total spend stopped
   **cumulative total** (`BUDGIE_BUDGET`, $): the net sum of dollars spent + running,
   projected over a horizon. Rate and accrued cost are tracked *separately* (the KML
   model); `budgie session` shows both.
-- ✅ **PostToolUse reconciliation** — records created resource ids and **credits the
-  burn back** when the agent deletes them (or when a create fails); teardown does
-  the same. No AWS polling.
+- ✅ **PostToolUse accounting** — commits a create's cost only once it **succeeds**,
+  records the resource id, and **credits it back** when the agent deletes it. A
+  failed create fires no hook, so it never counts — no phantom spend to unwind. No
+  AWS polling.
 - ✅ **Terraform** — `budgie tf-plan` prices a `terraform show -json` plan.
 - ✅ **Ledger** + **override** (`BUDGIE_OK=1` / `.budgie/allow.txt`).
 - ✅ **Live AWS pricing** — region-aware, disk-cached (AWS Price List API); zero-dep
@@ -227,6 +241,12 @@ budgie is a **fast advisory guard**, not an un-bypassable control. Know its edge
 - **Bash-tool only.** An agent using an AWS **MCP server** (boto3 directly)
   bypasses it. The un-bypassable tier is a scoped credential / SCP minted from the
   budget — on the roadmap.
+- **Cumulative budgets need both hooks.** `BUDGIE_BUDGET` accrues through the
+  PostToolUse hook, so wire **both** `budgie hook` and `budgie posthook` (the setup
+  above does). PreToolUse alone still enforces the per-command rate cap, but won't
+  accumulate spend across commands.
+- **EKS nodegroup counts `desiredSize`** (or 1 when only `min`/`max` is given);
+  autoscaling *beyond* desired isn't priced.
 - **Composite only where the data's in the command.** RDS storage/Multi-AZ and EKS
   node groups are folded in; an EC2 instance's own EBS volumes
   (`--block-device-mappings`) are **not yet**, so a big root volume can be

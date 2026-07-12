@@ -22,7 +22,6 @@ class Decision:
 def aggregate(
     estimates: list[Estimate],
     cap_hourly: float,
-    in_loop: bool = False,
     committed: float = 0.0,
     unbounded: bool = False,
 ) -> Decision:
@@ -70,8 +69,8 @@ def aggregate(
             f"verify it stays under ${cap_hourly:.2f}/hr. Review before running.{tail}",
         )
 
-    # (a bounded loop's full cost is already priced into qty; an unbounded loop is
-    # handled above — so `in_loop` no longer needs a blanket warn here.)
+    # (a bounded loop's full cost is already priced into its qty upstream; an
+    # unbounded loop is handled above — so a loop needs no blanket warn here.)
     if total > cap_hourly / 2:
         return Decision(
             "warn",

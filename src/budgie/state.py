@@ -206,7 +206,6 @@ def evaluate(command: str, cap_hourly: float, session_id: str = "") -> Decision:
     way to roll a phantom commit back; the fix is to never write it.)"""
     intents = _parse.extract(command)
     estimates = [_estimate(i) for i in intents]
-    in_loop = any(i.in_loop for i in intents)
     unbounded = any(i.unbounded for i in intents)
     cmd_hourly = sum(e.total_hourly for e in estimates if e.total_hourly is not None)
     prior = session_total(session_id)
@@ -217,7 +216,7 @@ def evaluate(command: str, cap_hourly: float, session_id: str = "") -> Decision:
             f"override — allowing ${cmd_hourly:.2f}/hr (session would reach " f"${prior + cmd_hourly:.2f}/hr).",
         )
     elif intents:
-        decision = aggregate(estimates, cap_hourly, in_loop, committed=prior, unbounded=unbounded)
+        decision = aggregate(estimates, cap_hourly, committed=prior, unbounded=unbounded)
         budget = _env_float("BUDGIE_BUDGET")  # cumulative total-$ gate (opt-in)
         if budget is not None and cmd_hourly > 0 and decision.verdict != "block":
             decision = _budget_decision(session_id, estimates, prior, cmd_hourly, budget, decision)
