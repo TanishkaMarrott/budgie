@@ -186,16 +186,25 @@ Two caps, use either or both:
   1h) may never cross $1. This is what catches slow accrual and create/tear-down
   churn that a rate cap alone misses.
 
-Live AWS pricing (full SKU coverage): `pip install "budgie-firewall[aws]"` and
-`BUDGIE_PRICING=aws`.
+**No silent allow.** Anything that provisions but can't be priced — an un-enumerated
+service, an unknown SKU, a hidden config — **warns**, never falls through to allow;
+a dynamic quantity (`--count $N`) or an unbounded loop **blocks**. Flip `BUDGIE_STRICT=1`
+to turn every can't-price warn into a hard block (the zero-escape-boat posture).
 
-**No silent allow.** A create/run/request/restore/allocate we can't price (an
-un-enumerated service, an unknown SKU, a hidden config) **warns** — it never falls
-through to allow. A dynamic quantity (`--count $N`) or an unbounded loop **blocks**
-(cost can't be bounded). For a zero-escape-boat posture, `BUDGIE_STRICT=1`
-escalates every *can't-price* warn to a hard **block** — nothing unpriceable runs.
-`BUDGIE_FAIL=open` is the opposite escape hatch (allow through on internal error /
-corrupt state); default is fail-**closed**.
+## Configuration
+
+Every knob is an environment variable; all are optional.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `BUDGIE_HOURLY` | `2.0` | **Rate** ceiling ($/hr) — the session may never burn faster than this at once. |
+| `BUDGIE_BUDGET` | *off* | **Cumulative total** ($) — dollars spent + still-running, projected over the horizon. Needs **both** hooks wired. |
+| `BUDGIE_HORIZON` | `1.0` | Hours the running rate is projected over for `BUDGIE_BUDGET`. |
+| `BUDGIE_STRICT` | *off* | `1` escalates every *can't-price* **warn → block** — nothing unpriceable runs. |
+| `BUDGIE_FAIL` | `closed` | On internal error / corrupt state: `closed` blocks spend, `open` allows through. |
+| `BUDGIE_OK` | *off* | `1` overrides the gate for the command (also `.budgie/allow.txt`, a substring allowlist). |
+| `BUDGIE_PRICING` | `static` | `static` = bundled offline table; `aws` = live Price List API (`pip install "budgie-firewall[aws]"`). |
+| `BUDGIE_HOME` | `.budgie` | Directory for the session ledger + price cache. |
 
 ## Commands
 
@@ -283,8 +292,11 @@ budgie is a **fast advisory guard**, not an un-bypassable control. Know its edge
   the fact and are not priced.
 - **Estimates, not invoices.** It ignores Reserved Instances / Savings Plans; spot
   is a rough ~70% off. A covered account may see over-estimates.
-- **Curated coverage.** It prices/warns the big bill-shock services; free creates
-  (security groups, tags) are intentionally silent.
+- **Curated *pricing*, but no silent allow.** The static table prices the big
+  bill-shock services exactly; anything else that **provisions** (an unknown SKU, an
+  un-enumerated service, a hidden config) still **warns** rather than passing through
+  — only genuinely free creates (security groups, tags, IAM, log groups…) are silent.
+  So coverage gaps cost you a warning to review, never an unnoticed create.
 
 ## License
 
