@@ -1,15 +1,23 @@
+<div align="center">
+
 # 🐦 budgie
 
-**A spend firewall for AI agents.** budgie is a Claude Code hook that prices an
-agent's cloud command *before it runs* — folding in **storage, node groups, whole
-loops, and the session's cumulative burn**, not just the headline instance — and
-blocks the ones that breach your budget. Billing alerts fire after the money's
-gone; budgie stops the command at the door.
+### A spend firewall for AI agents
 
+It prices an agent's cloud command **_before it runs_** and blocks the ones that breach
+your budget. Billing alerts fire after the money's gone — **budgie stops the command at the door.**
+
+block before the spend · session budget · composite pricing · whole loops · live-agent guard
+
+[![PyPI](https://img.shields.io/pypi/v/budgie-firewall)](https://pypi.org/project/budgie-firewall/)
 [![tests](https://github.com/TanishkaMarrott/budgie/actions/workflows/ci.yml/badge.svg)](https://github.com/TanishkaMarrott/budgie/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![deps](https://img.shields.io/badge/core%20deps-zero-brightgreen.svg)
+
+**[Install](#install) · [Why](#why) · [Architecture](#architecture--a-gate-and-a-ledger-kept-apart) · [Config](#configuration) · [PyPI](https://pypi.org/project/budgie-firewall/)**
+
+</div>
 
 ![a live Claude Code session — the agent runs an aws command and budgie blocks it before it executes](docs/wrap-demo.gif)
 
