@@ -11,13 +11,21 @@ gone; budgie stops the command at the door.
 ![python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![deps](https://img.shields.io/badge/core%20deps-zero-brightgreen.svg)
 
+![a live Claude Code session — the agent runs an aws command and budgie blocks it before it executes](docs/wrap-demo.gif)
+
+*Live: the agent tried to launch **3× c5.4xlarge** (~$1,489/mo) and budgie **blocked it before it ran** — over the session's cap.* One command puts the gate in front of a real agent:
+
+```bash
+budgie wrap claude     # launches Claude Code with budgie guarding every command
+```
+
+## Demo — the depth is in what it *sees*
+
+A **cheap** `db.t3.micro` blocked not for the instance but for the **20 TB of
+storage** attached to it — the difference between "block the big box" and
+understanding what a command actually costs.
+
 ![budgie pricing an agent's command before it runs — a cheap db class blocked by 20 TB of storage, node groups priced, and the session's live burn](docs/demo.gif)
-
-The depth is in what it *sees*: below, a **cheap** `db.t3.micro` is blocked — not
-for the instance, but for the **20 TB of storage** attached to it. That's the
-difference between "block the big box" and understanding what a command costs.
-
-## Demo
 
 ```console
 $ budgie check 'aws rds create-db-instance --db-instance-class db.t3.micro --allocated-storage 20000 --storage-type gp2'
@@ -36,7 +44,10 @@ $ budgie session
   agent-8f2: burning $4.61/hr  ·  accrued $13.83 so far
 ```
 
-Regenerate the animation with [`vhs`](https://github.com/charmbracelet/vhs): `vhs demo/demo.tape` → writes `docs/demo.gif`.
+Regenerate the animations with [`vhs`](https://github.com/charmbracelet/vhs):
+`vhs demo/demo.tape` (the CLI view) and `vhs demo/wrap.tape` (the live agent) — the
+latter records a real `budgie wrap claude` session; the committed gif is trimmed and
+palette-optimised from that raw capture.
 
 ## Architecture — a gate and a ledger, kept apart
 
@@ -164,8 +175,12 @@ uvx --from budgie-firewall budgie check "aws ec2 run-instances --instance-type p
 uvx --from git+https://github.com/TanishkaMarrott/budgie budgie check "aws ec2 run-instances --instance-type p5.48xlarge"
 ```
 
-Wire **both** hooks — PreToolUse blocks before the spend, PostToolUse commits it
-after success (required for cumulative budgets):
+**Fastest path — no settings edit:** `budgie wrap claude` launches Claude Code with
+both hooks injected for that session (via its `--settings` channel), so you can try
+budgie in one command.
+
+To wire it in permanently, add **both** hooks — PreToolUse blocks before the spend,
+PostToolUse commits it after success (required for cumulative budgets):
 
 ```jsonc
 // .claude/settings.json
@@ -215,6 +230,7 @@ budgie posthook              # PostToolUse hook — commits succeeded spend, cre
 budgie tf-plan plan.json     # price a `terraform show -json` plan
 budgie session               # show each session's burn ($/hr) and accrued ($)
 budgie ledger                # recent decisions + total spend stopped
+budgie wrap claude           # launch Claude Code with budgie's hooks injected (no settings edit)
 ```
 
 ## What it does today

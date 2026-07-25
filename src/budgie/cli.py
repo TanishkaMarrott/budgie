@@ -63,12 +63,18 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("tf-plan", help="price a `terraform show -json` plan file")
     t.add_argument("file")
     t.add_argument("--cap", type=float, default=None)
+    w = sub.add_parser("wrap", help="launch a coding agent guarded by budgie (e.g. budgie wrap claude)")
+    w.add_argument("agent_cmd", nargs=argparse.REMAINDER)
     sub.add_parser("version")
     args = p.parse_args(argv)
 
     if args.cmd == "version":
         print(__version__)
         return 0
+    if args.cmd == "wrap":
+        from .wrap import wrap_main
+
+        return wrap_main(args.agent_cmd)
     if args.cmd == "hook":
         from .hook import main as hook_main
 
