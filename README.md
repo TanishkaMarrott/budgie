@@ -17,15 +17,13 @@ block before the spend · session budget · composite pricing · whole loops · 
 
 **[Install](#install) · [Why](#why) · [Architecture](#architecture--a-gate-and-a-ledger-kept-apart) · [Config](#configuration) · [PyPI](https://pypi.org/project/budgie-firewall/)**
 
+`uvx --from budgie-firewall budgie wrap claude`
+
+<img src="docs/wrap-demo.gif" width="820" alt="a live Claude Code session — the agent runs an aws command and budgie blocks it before it executes">
+
+_Live: the agent tried to launch **3× c5.4xlarge** (~$1,489/mo) and budgie **blocked it before it ran** — over the session's cap._
+
 </div>
-
-![a live Claude Code session — the agent runs an aws command and budgie blocks it before it executes](docs/wrap-demo.gif)
-
-*Live: the agent tried to launch **3× c5.4xlarge** (~$1,489/mo) and budgie **blocked it before it ran** — over the session's cap.* One command puts the gate in front of a real agent:
-
-```bash
-budgie wrap claude     # launches Claude Code with budgie guarding every command
-```
 
 The depth is in what it *sees*: a **cheap** `db.t3.micro` is blocked not for the
 instance but for the **20 TB of storage** attached to it — the difference between
