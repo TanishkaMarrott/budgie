@@ -25,8 +25,6 @@ A **cheap** `db.t3.micro` blocked not for the instance but for the **20 TB of
 storage** attached to it — the difference between "block the big box" and
 understanding what a command actually costs.
 
-![budgie pricing an agent's command before it runs — a cheap db class blocked by 20 TB of storage, node groups priced, and the session's live burn](docs/demo.gif)
-
 ```console
 $ budgie check 'aws rds create-db-instance --db-instance-class db.t3.micro --allocated-storage 20000 --storage-type gp2'
 [BLOCK] 1× rds db.t3.micro ≈ $3.17/hr ($2,312/mo) — over the $2.00/hr session cap. Blocked.  [+20000GB gp2]
@@ -44,10 +42,9 @@ $ budgie session
   agent-8f2: burning $4.61/hr  ·  accrued $13.83 so far
 ```
 
-Regenerate the animations with [`vhs`](https://github.com/charmbracelet/vhs):
-`vhs demo/demo.tape` (the CLI view) and `vhs demo/wrap.tape` (the live agent) — the
-latter records a real `budgie wrap claude` session; the committed gif is trimmed and
-palette-optimised from that raw capture.
+Regenerate the animation with [`vhs`](https://github.com/charmbracelet/vhs):
+`vhs demo/wrap.tape` records a real `budgie wrap claude` session; the committed gif is
+trimmed and palette-optimised from that raw capture.
 
 ## Architecture — a gate and a ledger, kept apart
 
