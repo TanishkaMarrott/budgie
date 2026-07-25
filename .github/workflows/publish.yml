@@ -14,6 +14,8 @@ jobs:
       id-token: write            # required for Trusted Publishing
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false   # one-shot build, no lockfile to key a cache on
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@release/v1
