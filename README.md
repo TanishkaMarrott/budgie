@@ -19,32 +19,9 @@ gone; budgie stops the command at the door.
 budgie wrap claude     # launches Claude Code with budgie guarding every command
 ```
 
-## Demo — the depth is in what it *sees*
-
-A **cheap** `db.t3.micro` blocked not for the instance but for the **20 TB of
-storage** attached to it — the difference between "block the big box" and
-understanding what a command actually costs.
-
-```console
-$ budgie check 'aws rds create-db-instance --db-instance-class db.t3.micro --allocated-storage 20000 --storage-type gp2'
-[BLOCK] 1× rds db.t3.micro ≈ $3.17/hr ($2,312/mo) — over the $2.00/hr session cap. Blocked.  [+20000GB gp2]
-
-$ budgie check 'aws eks create-nodegroup --instance-types m5.24xlarge --scaling-config desiredSize=40'
-[BLOCK] 40× eks m5.24xlarge ≈ $184.32/hr ($134,554/mo) — over the $2.00/hr session cap. Blocked.
-
-$ budgie check 'aws ec2 run-instances --instance-type p5.48xlarge --count 2'
-[BLOCK] 2× ec2 p5.48xlarge ≈ $196.64/hr ($143,547/mo) — over the $2.00/hr session cap. Blocked.
-
-$ budgie check 'aws ec2 run-instances --instance-type t3.micro'
-[ALLOW] ≈ $0.01/hr — within budget.
-
-$ budgie session
-  agent-8f2: burning $4.61/hr  ·  accrued $13.83 so far
-```
-
-Regenerate the animation with [`vhs`](https://github.com/charmbracelet/vhs):
-`vhs demo/wrap.tape` records a real `budgie wrap claude` session; the committed gif is
-trimmed and palette-optimised from that raw capture.
+The depth is in what it *sees*: a **cheap** `db.t3.micro` is blocked not for the
+instance but for the **20 TB of storage** attached to it — the difference between
+"block the big box" and understanding what a command actually costs.
 
 ## Architecture — a gate and a ledger, kept apart
 
