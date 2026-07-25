@@ -1,7 +1,7 @@
 """budgie — a spend firewall for AI agents. Prices a cloud command before it
 runs and blocks the over-budget ones."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from . import parse as _parse
 from .estimate import estimate as _estimate
