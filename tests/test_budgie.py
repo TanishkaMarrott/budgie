@@ -33,7 +33,10 @@ def test_count_range_no_crash():
     assert v("aws ec2 run-instances --instance-type m5.large --count 1:5") == "allow"
 
 def test_garbage_count_no_crash():
-    assert v("aws ec2 run-instances --instance-type t3.micro --count notanumber") == "allow"
+    # A non-numeric count (a typo, or a runtime variable like --count $N) can't be
+    # bounded — pricing it as 1 was an escape boat. It must not crash, and it now
+    # fails SAFE (blocked as unbounded) rather than silently allowing qty=1.
+    assert v("aws ec2 run-instances --instance-type t3.micro --count notanumber") == "block"
 
 
 # --- MUST-FIX #1: embedded commands (loops / chains) no longer slip through ---

@@ -14,6 +14,10 @@ _IAC_MARKERS = (
     "cloudformation deploy",
     "cloudformation create-stack",
     "cdk deploy",
+    "sam deploy",
+    "serverless deploy",
+    "sls deploy",
+    "eksctl create",
 )
 
 
@@ -26,9 +30,11 @@ def check(command: str, cap_hourly: float = 2.0) -> Decision:
     # No parseable spend command. IaC applies have no CLI SKU -> warn, don't allow.
     lowered = command.strip().lower()
     if any(m in lowered for m in _IAC_MARKERS):
-        return Decision(
-            "warn",
-            "IaC apply detected — cost needs plan analysis (Infracost / AWS Pricing "
-            "MCP). Don't auto-approve unreviewed.",
-        )
+        from .gate import strict_mode
+
+        msg = ("IaC apply detected — cost needs plan analysis (Infracost / AWS Pricing "
+               "MCP). Don't auto-approve unreviewed.")
+        if strict_mode():
+            return Decision("block", msg + " Blocked (BUDGIE_STRICT).")
+        return Decision("warn", msg)
     return Decision("allow", "not a spend command")

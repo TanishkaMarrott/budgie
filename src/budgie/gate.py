@@ -3,14 +3,23 @@
 BLOCK : total known cost over the hourly cap
 WARN  : unknown/hidden cost, OR spend inside a loop, OR over half the cap
 ALLOW : total known cost under half the cap
+
+BUDGIE_STRICT=1 escalates the "unknown/hidden cost" WARN to a BLOCK — no
+unpriceable spend runs at all (the zero-escape-boat posture). Default is WARN so
+budgie stays usable for services it can't yet price.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from . import pricing
 from .estimate import Estimate
+
+
+def strict_mode() -> bool:
+    return os.environ.get("BUDGIE_STRICT", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -41,15 +50,16 @@ def aggregate(
     sess = f" (session would reach ${total:.2f}/hr)" if committed > 0 else ""
     top = max(known, key=lambda e: e.total_hourly).resource if known else ""
 
-    # An unbounded loop (while/until/xargs/dynamic range) that creates billable
-    # resources has no fixed count — total cost can't be bounded, so refuse it.
+    # No fixed count — an unbounded loop (while/until/xargs/dynamic range) OR a
+    # dynamic quantity (`--count $N`) creating billable resources. Cost can't be
+    # bounded, so refuse rather than price it as one and let a fan-out through.
     if unbounded and (cmd_total > 0 or unknown):
         what = top or (unknown[0].resource if unknown else "resources")
         each = f" (≈${cmd_total:.2f}/hr each)" if cmd_total > 0 else ""
         return Decision(
             "block",
-            f"unbounded loop creates {what}{each} with no fixed iteration count — "
-            f"cost can't be bounded. Blocked.{tail}",
+            f"unbounded create — {what}{each} with no fixed count (loop or dynamic "
+            f"--count); cost can't be bounded. Blocked.{tail}",
         )
 
     if total > cap_hourly:
@@ -63,6 +73,12 @@ def aggregate(
 
     if unknown:
         u = unknown[0]
+        if strict_mode():
+            return Decision(
+                "block",
+                f"unknown price for {u.resource} ({u.note or 'unrecognized'}) — can't "
+                f"verify it stays under ${cap_hourly:.2f}/hr and BUDGIE_STRICT is on. Blocked.{tail}",
+            )
         return Decision(
             "warn",
             f"unknown price for {u.resource} ({u.note or 'unrecognized'}) — can't "

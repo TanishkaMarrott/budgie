@@ -19,7 +19,10 @@ import json
 import os
 import sys
 
-_SPEND_MARKERS = ("aws ", "terraform ", "pulumi ", "gcloud ", "cloudformation", " az ")
+_SPEND_MARKERS = (
+    "aws ", "terraform ", "pulumi ", "gcloud ", "cloudformation", " az ",
+    "cdk ", "eksctl ", "sam ", "serverless ", "sls ", "kubectl ",
+)
 
 
 def _emit(**fields) -> None:
@@ -78,12 +81,18 @@ def posthook_main() -> int:
     if isinstance(resp, dict):
         # 2.1.121 uses `stdout`; other/older versions use `text` or `output`.
         output = resp.get("stdout") or resp.get("text") or resp.get("output") or ""
+        stderr = resp.get("stderr") or ""
+        interrupted = bool(resp.get("interrupted"))
     else:
-        output = str(resp or "")
+        output, stderr, interrupted = str(resp or ""), "", False
     try:
-        from .reconcile import reconcile
+        from .reconcile import reconcile, _looks_failed
 
-        reconcile(command, output, session_id)
+        # Don't trust the success-only firing contract blindly: if the tool was
+        # interrupted or the output carries a botocore error, treat it as failed and
+        # commit nothing — no phantom spend even if PostToolUse fires on a failure.
+        failed = interrupted or _looks_failed(output + "\n" + stderr)
+        reconcile(command, output, session_id, failed=failed)
     except Exception:
         pass
     return 0

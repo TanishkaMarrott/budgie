@@ -42,11 +42,65 @@ _WARN_ACTIONS = {
     ("mq", "create-broker"),
     ("elasticache", "create-replication-group"),
     ("redshift-serverless", "create-workgroup"),
+    ("memorydb", "create-cluster"),  # billable; create-cluster no longer flat-priced
+    ("dax", "create-cluster"),
 }
 _QTY_FLAGS = ("count", "max-count", "min-count", "num-cache-nodes", "number-of-nodes")
 _UNPRICEABLE = ("cli-input-json", "cli-input-yaml")
 _LOOP = {"for", "while", "until", "xargs"}
 _BOUNDARY = {";", "&&", "||", "|", "&", "do", "done", "then", "fi", "(", ")", "{", "}"}
+
+# AWS CLI *global* options that can precede the service name and take a value.
+# They must be skipped when locating the service, else `aws --region x ec2
+# run-instances` parses `--region` as the service and the command is a silent
+# allow — the single most common invocation form was a total bypass.
+_GLOBAL_VALUE_FLAGS = {
+    "region", "profile", "output", "endpoint-url", "cli-read-timeout",
+    "cli-connect-timeout", "ca-bundle", "cli-binary-format", "color",
+    "query", "page-size", "max-items", "starting-token",
+}
+
+# Safety net (no silent allow of unknown spend). Any action starting with one of
+# these verbs *provisions* something billable — if we couldn't price or warn it
+# above, it must still WARN rather than fall through to allow. This closes the
+# whole class of un-enumerated expensive creates (autoscaling groups, EC2/spot
+# fleets, dedicated hosts, FSx, Lightsail, DocumentDB/Neptune, RDS restores, …).
+_BILLABLE_VERBS = (
+    "create-", "run-", "request-", "restore-", "provision-",
+    "allocate-", "purchase-", "reserve-", "launch-",
+)
+# The exception list: genuinely free-to-create operations, kept silent so routine
+# automation isn't buried in warnings. Everything NOT here that matches a verb warns.
+_FREE_CREATE_ACTIONS = {
+    # networking / compute primitives (free)
+    "create-security-group", "create-vpc", "create-subnet", "create-route-table",
+    "create-route", "create-internet-gateway", "create-egress-only-internet-gateway",
+    "create-network-interface", "create-network-acl", "create-dhcp-options",
+    "create-key-pair", "import-key-pair", "create-placement-group",
+    "create-launch-template", "create-launch-template-version",
+    "create-tags", "create-default-vpc", "create-default-subnet",
+    "create-customer-gateway", "create-local-gateway-route",
+    # snapshots / images (storage-usage, not provisioning)
+    "create-snapshot", "create-image", "register-image",
+    # RDS/ElastiCache/Redshift config objects (free)
+    "create-db-subnet-group", "create-db-parameter-group", "create-db-cluster-parameter-group",
+    "create-cache-subnet-group", "create-cache-parameter-group", "create-option-group",
+    "create-cluster-subnet-group", "create-cluster-parameter-group",
+    # IAM / identity (free)
+    "create-role", "create-policy", "create-policy-version", "create-user",
+    "create-group", "create-instance-profile", "create-service-linked-role",
+    "create-login-profile", "create-access-key", "create-saml-provider",
+    # serverless / eventing / logs / storage-container (free to create; usage-billed)
+    "create-function", "create-bucket", "create-topic", "create-queue",
+    "create-log-group", "create-log-stream", "create-repository", "create-secret",
+    "create-api", "create-rest-api", "create-deployment", "create-stage",
+    "create-hosted-zone", "create-change-set", "create-alarm",
+}
+# Ambiguous action names that are free only for specific services (kept silent).
+_FREE_CREATE_SA = {
+    ("ecs", "create-cluster"),  # ECS cluster is free; tasks/services carry the cost
+    ("batch", "create-compute-environment"),  # priced when it launches, not here
+}
 
 
 def _kv(s: str, key: str) -> str | None:
@@ -92,6 +146,11 @@ class Intent:
 
 
 def _tokenize(command: str) -> list[str]:
+    # Neutralise shell substitution / subshell punctuation so an `aws` hidden
+    # inside $(...), `...`, or a ( subshell ) is exposed as its own token instead
+    # of being glued to `$(` and silently missed. We parse intent, never execute,
+    # so flattening these fails toward *detecting more*, which is the safe side.
+    command = re.sub(r"\$\(|[()`]", " ", command)
     try:
         toks = shlex.split(command, comments=False, posix=True)
     except ValueError:
@@ -138,6 +197,22 @@ def _qty(flags: dict[str, str]) -> int:
     return 1
 
 
+def _qty_is_dynamic(flags: dict[str, str]) -> bool:
+    """A quantity flag whose value isn't a literal integer (`--count $N`,
+    `--count $(…)`) can't be bounded — pricing it as 1 would let an arbitrarily
+    large fan-out through. Treated like an unbounded loop: the gate blocks it."""
+    for k in _QTY_FLAGS:
+        v = flags.get(k)
+        if v:
+            n = v.split(":")[-1]
+            try:
+                int(n)
+                return False
+            except ValueError:
+                return True
+    return False
+
+
 def _mk(service, action, table, sku, flags, in_loop, raw, priceable=True, reason=""):
     return Intent(
         service=service,
@@ -152,14 +227,37 @@ def _mk(service, action, table, sku, flags, in_loop, raw, priceable=True, reason
         reason=reason,
         in_loop=in_loop,
         raw=raw,
+        unbounded=_qty_is_dynamic(flags),  # dynamic --count can't be bounded -> block
     )
 
 
-def _parse_invocation(span: list[str], in_loop: bool, raw: str) -> Intent | None:
-    if len(span) < 2:
+def _service_action(span: list[str]) -> tuple[str, str, dict[str, str]] | None:
+    """Find (service, action, flags), skipping any leading AWS *global* options
+    (--region/--profile/--output/…) that precede the service name. Without this,
+    `aws --profile p ec2 run-instances` parsed `--profile` as the service and was
+    silently allowed — the worst failure mode a firewall can have."""
+    i, n = 0, len(span)
+    while i < n and span[i].startswith("-"):
+        name = span[i].lstrip("-")
+        if "=" in name:  # --region=x — value attached, one token
+            i += 1
+        elif name in _GLOBAL_VALUE_FLAGS and i + 1 < n and not span[i + 1].startswith("-"):
+            i += 2  # --region x — consume the value too
+        else:
+            i += 1  # boolean global flag (--debug, --no-verify-ssl, …)
+    if i + 1 >= n:  # need both a service and an action
         return None
-    service, action = span[0], span[1]
-    flags = _split_flags(span[2:])
+    # Parse flags across the WHOLE span so a global `--region`/`--profile` that
+    # preceded the service is still captured (skipping it must not drop its value —
+    # the live pricer needs the region). Positional service/action are ignored.
+    return span[i], span[i + 1], _split_flags(span)
+
+
+def _parse_invocation(span: list[str], in_loop: bool, raw: str) -> Intent | None:
+    sa = _service_action(span)
+    if sa is None:
+        return None
+    service, action, flags = sa
     unpriceable = any(f in flags for f in _UNPRICEABLE)
 
     def warn(reason):
@@ -230,7 +328,12 @@ def _parse_invocation(span: list[str], in_loop: bool, raw: str) -> Intent | None
             return _mk(service, action, table, sku, flags, in_loop, raw)
         return warn("params in --cli-input-json") if unpriceable else warn(f"{action}: instance type missing")
 
-    if action in _FLAT_ACTIONS:
+    # create-cluster is service-ambiguous: only EKS is the flat $0.10 control
+    # plane. kafka/emr create-cluster are bill-shock services meant to WARN below;
+    # ecs create-cluster is free. Gate the flat match on the service so MSK/EMR are
+    # no longer mispriced to $0.10 and allowed (their _WARN_ACTIONS entries were
+    # dead code — flat matched first).
+    if action in _FLAT_ACTIONS and not (action == "create-cluster" and service != "eks"):
         return _mk(service, action, "flat", _FLAT_ACTIONS[action], flags, in_loop, raw)
 
     # Billable-but-unparseable (Fargate, Aurora, EMR, SageMaker training, MSK, ...) -> warn.
@@ -239,6 +342,17 @@ def _parse_invocation(span: list[str], in_loop: bool, raw: str) -> Intent | None
 
     if (action.startswith("create") or action.startswith("run")) and unpriceable:
         return warn("params in --cli-input-json")
+
+    # SAFETY NET — no silent allow of unknown spend. If the action provisions
+    # something (a billable verb) and we didn't recognise/price it above, and it's
+    # not on the curated free-create allowlist, WARN rather than fall through to
+    # allow. This closes the whole class of un-enumerated expensive creates.
+    if (
+        action.startswith(_BILLABLE_VERBS)
+        and action not in _FREE_CREATE_ACTIONS
+        and (service, action) not in _FREE_CREATE_SA
+    ):
+        return warn(f"{service} {action}: provisions a billable resource we can't price — review before running")
     return None
 
 

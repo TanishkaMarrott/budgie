@@ -152,6 +152,9 @@ and cost kept distinct, with active vs torn-down resources tracked separately.
 
 ## Install
 
+> **Name:** the PyPI package is **`budgie-firewall`** and the command is `budgie`.
+> (The bare `budgie` name on PyPI is an unrelated 2015 SSH tool — not this project.)
+
 ```bash
 # from PyPI (once published) — package is budgie-firewall, the command is budgie
 uvx --from budgie-firewall budgie check "aws ec2 run-instances --instance-type p5.48xlarge --count 2"
@@ -186,6 +189,14 @@ Two caps, use either or both:
 Live AWS pricing (full SKU coverage): `pip install "budgie-firewall[aws]"` and
 `BUDGIE_PRICING=aws`.
 
+**No silent allow.** A create/run/request/restore/allocate we can't price (an
+un-enumerated service, an unknown SKU, a hidden config) **warns** — it never falls
+through to allow. A dynamic quantity (`--count $N`) or an unbounded loop **blocks**
+(cost can't be bounded). For a zero-escape-boat posture, `BUDGIE_STRICT=1`
+escalates every *can't-price* warn to a hard **block** — nothing unpriceable runs.
+`BUDGIE_FAIL=open` is the opposite escape hatch (allow through on internal error /
+corrupt state); default is fail-**closed**.
+
 ## Commands
 
 ```
@@ -204,7 +215,12 @@ budgie ledger                # recent decisions + total spend stopped
   Redshift, ELB, SageMaker, OpenSearch. **Warns** (never silent-allow) when cost is
   hidden — Fargate, Aurora, EMR, MSK, `--cli-input-json`, `terraform apply`.
 - ✅ Extracts **every** `aws` invocation from **loops / `&&` / `;` / xargs / full
-  paths**; handles `--dry-run`, **spot** (~70% off), **region**, robust `--count 1:5`.
+  paths**, including ones **behind leading global flags** (`aws --region … --profile …
+  ec2 run-instances`) and **inside `$(…)` / backticks** — the common forms that must
+  not slip past. **Disambiguates service-ambiguous actions**: only `eks create-cluster`
+  is the flat $0.10 control plane; `kafka`/`emr create-cluster` **warn** (bill-shock),
+  `ecs create-cluster` is free. Handles `--dry-run`, **spot** (~70% off), **region**,
+  robust `--count 1:5`.
 - ✅ **Prices the whole loop, not one iteration** — `for i in $(seq 100); do …`
   is costed as 100×, so the $6,531 runaway-loop pattern **blocks**. A loop with no
   bounded count (`while` / `xargs` / a dynamic range) that creates billable
@@ -217,8 +233,16 @@ budgie ledger                # recent decisions + total spend stopped
   model); `budgie session` shows both.
 - ✅ **PostToolUse accounting** — commits a create's cost only once it **succeeds**,
   records the resource id, and **credits it back** when the agent deletes it. A
-  failed create fires no hook, so it never counts — no phantom spend to unwind. No
-  AWS polling.
+  failed create fires no hook, so it never counts — and as a belt-and-braces check it
+  also **refuses to commit** an interrupted command or one whose output carries a
+  botocore error, so no phantom spend even if a future version fires PostToolUse on
+  failure. Resources are recorded by their **user-assigned identifier** too, so a
+  teardown still credits back under `--output text`. A **resize** (`modify-*`) is
+  gated but not re-committed (no double-count). No AWS polling.
+- ✅ **Durable session state** — the budget ledger is written **atomically**
+  (`os.replace`) and guarded by a **file lock**, so a crash mid-write or two parallel
+  hooks can't corrupt it or lose a commit. A ledger that *can't* be read **fails
+  closed** (blocks spend) rather than silently resetting the budget to $0.
 - ✅ **Terraform** — `budgie tf-plan` prices a `terraform show -json` plan.
 - ✅ **Ledger** + **override** (`BUDGIE_OK=1` / `.budgie/allow.txt`).
 - ✅ **Live AWS pricing** — region-aware, disk-cached (AWS Price List API); zero-dep

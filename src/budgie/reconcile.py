@@ -33,6 +33,22 @@ _DELETE_IDS = {
     "delete-cache-cluster": "cache-cluster-id",
     "delete-load-balancer": "load-balancer-arn",
 }
+# create action -> the flag holding the USER-ASSIGNED identifier. Recording by this
+# (in addition to the output-parsed id) means a later delete can credit the resource
+# even when the create ran with --output text / --query and emitted no parseable id.
+# Only where the create's identifier matches the delete's identifier flag above.
+_CREATE_ID_FLAGS = {
+    "create-db-instance": "db-instance-identifier",
+    "create-nodegroup": "nodegroup-name",
+    "create-cluster": "cluster-name",  # eks
+    "create-cache-cluster": "cache-cluster-id",
+}
+
+# botocore's CLI prints this exact prefix on EVERY failed API call. If PostToolUse
+# ever fires on a failure (the success-only guarantee is version-specific), this is
+# the defensive signal that a "create" did not actually create anything.
+def _looks_failed(text: str) -> bool:
+    return "An error occurred (" in (text or "") and "when calling the" in text
 # id keys AWS returns in create output JSON
 _ID_KEYS = (
     "InstanceId",
@@ -76,10 +92,11 @@ def _ids_from(value: str) -> list[str]:
     return [p for p in re.split(r"[,\s]+", value.strip()) if p]
 
 
-def _delete_targets(command: str) -> list[str]:
-    """Resource ids named by any aws delete/terminate invocation in the command."""
+def _walk(command: str):
+    """Yield (service, action, flags) for every aws invocation — reusing the
+    parser's global-flag-aware span logic so `aws --region x ec2 terminate-instances`
+    is credited too (the leading-global-flag bypass hit deletes as well as creates)."""
     tokens = _parse._tokenize(command)
-    targets: list[str] = []
     n, i = len(tokens), 0
     while i < n:
         if _parse._is_aws(tokens[i]):
@@ -87,27 +104,59 @@ def _delete_targets(command: str) -> list[str]:
             while j < n and not _parse._is_aws(tokens[j]) and tokens[j] not in _parse._BOUNDARY:
                 span.append(tokens[j])
                 j += 1
-            if len(span) >= 2:
-                flags = _parse._split_flags(span[2:])
-                idflag = _DELETE_IDS.get(span[1])
-                if idflag and flags.get(idflag):
-                    targets += _ids_from(flags[idflag])
+            sa = _parse._service_action(span)
+            if sa:
+                yield sa
             i = j if j > i else i + 1
         else:
             i += 1
-    return targets
 
 
-def reconcile(command: str, output: str, session_id: str) -> dict:
-    """Post-execution (success is implicit — PostToolUse only fires on success):
-    commit a create's cost now that it's a fact, or credit a delete."""
-    intents = _parse.extract(command)  # a priced CREATE?
-    if intents:
-        ests = [_estimate(i) for i in intents]
+def _named_ids(command: str, flag_map: dict) -> list[str]:
+    ids: list[str] = []
+    for _service, action, flags in _walk(command):
+        idflag = flag_map.get(action)
+        if idflag and flags.get(idflag):
+            ids += _ids_from(flags[idflag])
+    return ids
+
+
+def _delete_targets(command: str) -> list[str]:
+    """Resource ids named by any aws delete/terminate invocation in the command."""
+    return _named_ids(command, _DELETE_IDS)
+
+
+def _dedupe(seq):
+    seen, out = set(), []
+    for x in seq:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def reconcile(command: str, output: str, session_id: str, failed: bool = False) -> dict:
+    """Post-execution accounting. PostToolUse *should* fire only on success, but we
+    do not rely on that alone: if the call was interrupted or its output carries a
+    botocore error, `failed` is set and we commit NOTHING (defensive no-phantom-spend).
+
+    On success: commit a create's cost, or credit a delete."""
+    if failed:
+        return {"action": "skipped-failed"}
+
+    intents = _parse.extract(command)
+    # A resize (modify-*) is priced by the GATE, but committing it here would ADD a
+    # second full instance rate on top of the original create — double-counting. The
+    # gate still blocks an over-cap resize; the ledger simply doesn't re-commit it.
+    committable = [i for i in intents if not i.action.startswith("modify")]
+    if committable:
+        ests = [_estimate(i) for i in committable]
         rate = sum(e.total_hourly for e in ests if e.total_hourly is not None)
         if rate:
             state._commit(session_id, rate)  # count the spend — it succeeded
-        ids = _created_ids(output)
+        # Record by BOTH the output-parsed id and the user-assigned identifier from
+        # the create command, so a later delete credits back even under --output text.
+        ids = _dedupe(_created_ids(output) + _named_ids(command, _CREATE_ID_FLAGS))
         if ids and rate:
             per = round(rate / len(ids), 6)
             for rid in ids:

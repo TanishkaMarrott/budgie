@@ -14,10 +14,16 @@ State lives under $BUDGIE_HOME (default `.budgie`).
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 import os
 from pathlib import Path
+
+try:
+    import fcntl  # POSIX advisory locks (macOS/Linux — the hook's runtime)
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
 
 from . import parse as _parse
 from .estimate import estimate as _estimate
@@ -34,30 +40,78 @@ def _session_file(sid: str) -> Path:
 
 _DELTA_CAP_H = 24.0  # cap one interval's accrual so a long gap can't explode it
 
+_EMPTY = {"active_rate": 0.0, "accrued_cost": 0.0, "last_ts": None, "resources": {}}
+
+
+class SessionStateError(Exception):
+    """The session file exists but can't be read/parsed — the budget is untrusted."""
+
+
+@contextlib.contextmanager
+def _locked(sid: str):
+    """Serialize the read-modify-write of one session across concurrent hook
+    processes (two parallel Bash calls firing Pre/PostToolUse at once) so a
+    lost update can't drop committed spend. No-ops where fcntl is unavailable."""
+    f = _session_file(sid)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    if fcntl is None:
+        yield
+        return
+    lock = f.with_name(f.name + ".lock")
+    fh = open(lock, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+def _load(sid: str) -> dict:
+    """Session state, or raise SessionStateError if the file exists but is corrupt.
+    A missing file is a fresh (trustworthy-empty) session, not an error."""
+    f = _session_file(sid)
+    if not f.exists():
+        return dict(_EMPTY, resources={})
+    try:
+        d = json.loads(f.read_text())
+        return {
+            "active_rate": float(d.get("active_rate", 0.0)),
+            "accrued_cost": float(d.get("accrued_cost", 0.0)),
+            "last_ts": d.get("last_ts"),
+            "resources": dict(d.get("resources", {})),
+        }
+    except (json.JSONDecodeError, ValueError, TypeError, OSError) as exc:
+        raise SessionStateError(str(f)) from exc
+
 
 def _read(sid: str) -> dict:
-    """Session state: active_rate ($/hr, the current burn) + accrued_cost ($, the
-    time-integral) + last_ts. Rate and cost are SEPARATE — a torn-down resource
-    lowers active_rate but its past dollars stay in accrued_cost."""
-    f = _session_file(sid)
-    if f.exists():
-        try:
-            d = json.loads(f.read_text())
-            return {
-                "active_rate": float(d.get("active_rate", 0.0)),
-                "accrued_cost": float(d.get("accrued_cost", 0.0)),
-                "last_ts": d.get("last_ts"),
-                "resources": dict(d.get("resources", {})),
-            }
-        except (json.JSONDecodeError, ValueError, OSError):
-            pass
-    return {"active_rate": 0.0, "accrued_cost": 0.0, "last_ts": None, "resources": {}}
+    """Tolerant read for display/accounting paths: a corrupt file reads as empty
+    so `budgie session`/reconcile never crash. The *gate* checks _session_unreadable
+    separately and fails CLOSED — corruption must never silently reset the budget."""
+    try:
+        return _load(sid)
+    except SessionStateError:
+        return dict(_EMPTY, resources={})
+
+
+def _session_unreadable(sid: str) -> bool:
+    try:
+        _load(sid)
+        return False
+    except SessionStateError:
+        return True
 
 
 def _write(sid: str, s: dict) -> None:
+    """Atomic write: serialise to a temp file, then os.replace (atomic on the same
+    filesystem) so a crash mid-write can't leave a half-written, corrupt ledger."""
     f = _session_file(sid)
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(
+    tmp = f.with_name(f"{f.name}.tmp.{os.getpid()}")
+    tmp.write_text(
         json.dumps(
             {
                 "active_rate": round(s["active_rate"], 6),
@@ -67,6 +121,7 @@ def _write(sid: str, s: dict) -> None:
             }
         )
     )
+    os.replace(tmp, f)
 
 
 def _accrue(s: dict, now: "datetime.datetime") -> dict:
@@ -98,35 +153,39 @@ def session_accrued(sid: str) -> float:
 def _commit(sid: str, hourly: float) -> None:
     """A new resource goes live: accrue elapsed at the old rate, then raise the
     active rate."""
-    s = _accrue(_read(sid), datetime.datetime.now())
-    s["active_rate"] += hourly
-    _write(sid, s)
+    with _locked(sid):
+        s = _accrue(_read(sid), datetime.datetime.now())
+        s["active_rate"] += hourly
+        _write(sid, s)
 
 
 def release_active(sid: str, hourly: float) -> None:
     """A resource is torn down (is_deleted): accrue up to now at the old rate,
     then LOWER the active rate. Past dollars stay; future accrual drops."""
-    s = _accrue(_read(sid), datetime.datetime.now())
-    s["active_rate"] = max(0.0, s["active_rate"] - hourly)
-    _write(sid, s)
+    with _locked(sid):
+        s = _accrue(_read(sid), datetime.datetime.now())
+        s["active_rate"] = max(0.0, s["active_rate"] - hourly)
+        _write(sid, s)
 
 
 def record_resource(sid: str, resource_id: str, rate: float) -> None:
     """Associate a just-created resource id with its rate (committed alongside, at
     PostToolUse). Doesn't touch active_rate — only enables later release-by-id."""
-    s = _read(sid)
-    s["resources"][resource_id] = round(float(rate), 6)
-    _write(sid, s)
+    with _locked(sid):
+        s = _read(sid)
+        s["resources"][resource_id] = round(float(rate), 6)
+        _write(sid, s)
 
 
 def release_by_id(sid: str, resource_id: str) -> float:
     """A resource with a known id was deleted: drop its rate from the active burn
     and the map. Returns the freed rate (0.0 if the id wasn't tracked)."""
-    s = _accrue(_read(sid), datetime.datetime.now())
-    rate = float(s["resources"].pop(resource_id, 0.0))
-    if rate:
-        s["active_rate"] = max(0.0, s["active_rate"] - rate)
-    _write(sid, s)
+    with _locked(sid):
+        s = _accrue(_read(sid), datetime.datetime.now())
+        rate = float(s["resources"].pop(resource_id, 0.0))
+        if rate:
+            s["active_rate"] = max(0.0, s["active_rate"] - rate)
+        _write(sid, s)
     return rate
 
 
@@ -210,7 +269,20 @@ def evaluate(command: str, cap_hourly: float, session_id: str = "") -> Decision:
     cmd_hourly = sum(e.total_hourly for e in estimates if e.total_hourly is not None)
     prior = session_total(session_id)
 
-    if intents and (os.environ.get("BUDGIE_OK") or _allowlisted(command)):
+    override = bool(intents and (os.environ.get("BUDGIE_OK") or _allowlisted(command)))
+    fail_open = os.environ.get("BUDGIE_FAIL", "closed").lower() == "open"
+
+    if intents and not override and not fail_open and _session_unreadable(session_id):
+        # Corrupt/unreadable budget state: block spend rather than silently treating
+        # the session as $0 spent (which would fail OPEN). Override / BUDGIE_FAIL=open
+        # still let it through.
+        decision = Decision(
+            "block",
+            "session budget state is unreadable/corrupt — blocked to be safe; an "
+            "untrusted ledger must not reset the budget to $0. Remove the session "
+            "file or set BUDGIE_FAIL=open to override.",
+        )
+    elif override:
         decision = Decision(
             "allow",
             f"override — allowing ${cmd_hourly:.2f}/hr (session would reach " f"${prior + cmd_hourly:.2f}/hr).",
